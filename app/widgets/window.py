@@ -1,8 +1,14 @@
-"""The viewer: one window, one finished result.
+"""The application shell: an upload screen, then a results screen.
 
-No background work happens here. Scanning, model loading and scoring are done
-by app/runner.py before this window is constructed, and they log to the
-terminal. This just draws what came out.
+There is no navigation rail. You start by saying what you are uploading, and
+what comes back is decided by that: a labeled dataset opens on Insights with
+Images and Robustness behind header tabs, while plain images open on the
+verdict gallery with no tabs at all - there is nothing else to look at when
+there is no ground truth.
+
+The pipeline itself lives in runner.py / sweep.py and logs to the terminal.
+This owns the widgets and moves the work onto a thread so the window stays
+responsive; it never reimplements the pipeline.
 """
 
 from __future__ import annotations
@@ -10,495 +16,454 @@ from __future__ import annotations
 import math
 import os
 
-from PyQt6.QtCore import (
-    QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QTimer, Qt
-)
-from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPixmap
+from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtWidgets import (
-    QFileDialog, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QMainWindow,
-    QMessageBox, QPushButton, QSlider, QSplitter, QStyledItemDelegate,
-    QTableView, QVBoxLayout, QWidget
+    QButtonGroup, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
+    QMessageBox, QPushButton, QSlider, QStackedWidget, QVBoxLayout, QWidget
 )
 
 from .. import export as EX
 from .. import metrics as M
+from .. import runner
+from .. import sweep as SW
 from .. import theme as T
-from .charts import MplCanvas
-from .components import Badge, Card, Chip, SectionTitle, StatCard, score_color
+from ..dataset import LabelMode
+from ..workers import LoadWorker, ScanWorker, ScoreWorker, SweepWorker
+from . import components as C
+from .components import Dot, Tab
+from .gallery import GalleryPage
+from .pages import ImagesPage, InsightsPage, RobustnessPage
+from .upload import UploadPage
 
-FILTER_ALL, FILTER_FP, FILTER_FN, FILTER_AI, FILTER_REAL = range(5)
-COLUMNS = ["Image", "Score", "Truth", "Pred", "Result"]
+SCREEN_UPLOAD, SCREEN_RESULTS = range(2)
+TAB_INSIGHTS, TAB_IMAGES, TAB_ROBUSTNESS, VIEW_GALLERY = range(4)
 
+#: the three tabs a labeled run gets, in order. The gallery is not one of them:
+#: it is the whole of the unlabeled screen, so it never needs a tab.
+TABS = [
+    ("Insights", "How the detector performed"),
+    ("Images", "Every prediction, filterable"),
+    ("Robustness", "Accuracy under post-processing"),
+]
 
-class ResultsModel(QAbstractTableModel):
-    def __init__(self, view, parent=None):
-        super().__init__(parent)
-        self.view = view          # ResultsWindow, for dataset/scores/threshold
-        self.rows: list = []
-
-    def set_rows(self, rows):
-        self.beginResetModel()
-        self.rows = list(rows)
-        self.endResetModel()
-
-    def rowCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(self.rows)
-
-    def columnCount(self, parent=QModelIndex()):
-        return len(COLUMNS)
-
-    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
-        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
-            return COLUMNS[section]
-        return None
-
-    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid():
-            return None
-        di = self.rows[index.row()]
-        item = self.view.dataset.items[di]
-        score = self.view.score_at(di)
-        pred = None if score is None else int(score >= self.view.threshold)
-        col = index.column()
-
-        if role == Qt.ItemDataRole.UserRole:                    # sort key
-            return [item.rel_path, -1.0 if score is None else score,
-                    -1 if item.label is None else item.label,
-                    -1 if pred is None else pred,
-                    _result_text(item.label, pred)][col]
-
-        if role == Qt.ItemDataRole.DisplayRole:
-            return [item.rel_path,
-                    "—" if score is None else f"{score:.4f}",
-                    _label_text(item.label),
-                    _label_text(pred),
-                    _result_text(item.label, pred)][col]
-
-        if role == Qt.ItemDataRole.ToolTipRole:
-            return item.path
-
-        if role == Qt.ItemDataRole.ForegroundRole:
-            if col == 2 and item.label is not None:
-                return QBrush(QColor(T.AI_COLOR if item.label else T.REAL_COLOR))
-            if col == 3 and pred is not None:
-                return QBrush(QColor(T.AI_COLOR if pred else T.REAL_COLOR))
-            if col == 4:
-                txt = _result_text(item.label, pred)
-                if txt.startswith("✓"):
-                    return QBrush(QColor(T.GOOD))
-                if txt.startswith("✗"):
-                    return QBrush(QColor(T.BAD))
-                return QBrush(QColor(T.TEXT_FAINT))
-
-        if role == Qt.ItemDataRole.TextAlignmentRole and col > 0:
-            return int(Qt.AlignmentFlag.AlignCenter)
-
-        if role == Qt.ItemDataRole.UserRole + 1:
-            return score
-        if role == Qt.ItemDataRole.UserRole + 2:
-            return di
-        return None
+#: the threshold means something on any page that renders a verdict
+THRESHOLD_VIEWS = (TAB_INSIGHTS, TAB_IMAGES, VIEW_GALLERY)
 
 
-def _label_text(label) -> str:
-    return "—" if label is None else ("AI" if label == 1 else "Real")
-
-
-def _result_text(label, pred) -> str:
-    if label is None or pred is None:
-        return "—"
-    if label == pred:
-        return "✓"
-    return "✗ FP" if pred == 1 else "✗ FN"
-
-
-class ScoreBarDelegate(QStyledItemDelegate):
-    """Confidence drawn as a bar behind the number."""
-
-    def paint(self, painter: QPainter, option, index):
-        score = index.data(Qt.ItemDataRole.UserRole + 1)
-        if score is None:
-            return super().paint(painter, option, index)
-        painter.save()
-        r = option.rect.adjusted(6, 7, -6, -7)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(QColor("#25252C")))
-        painter.drawRoundedRect(r, 4, 4)
-        c = QColor(score_color(score))
-        c.setAlpha(150)
-        painter.setBrush(QBrush(c))
-        painter.drawRoundedRect(
-            r.adjusted(0, 0, -int(r.width() * (1.0 - float(score))), 0), 4, 4)
-        painter.setPen(QPen(QColor(T.TEXT)))
-        f = QFont(painter.font())
-        f.setBold(True)
-        painter.setFont(f)
-        painter.drawText(option.rect, Qt.AlignmentFlag.AlignCenter, f"{score:.4f}")
-        painter.restore()
-
-
-class ResultsWindow(QMainWindow):
-    """Everything the app shows, in one window."""
-
-    def __init__(self, dataset, result, robustness: dict = None, threshold: float = 0.5):
+class AppWindow(QMainWindow):
+    def __init__(self, start_dir: str = None, start_json: str = None,
+                 threshold: float = 0.5):
         super().__init__()
-        self.dataset = dataset
-        self.result = result
-        self.robustness = robustness or {}
+
+        # -- state
+        self.dataset = None
+        self.result = None
+        self.robustness = {}
         self.threshold = threshold
-        self._filter = FILTER_ALL
-        self._selected = -1
+        # What Reset goes back to. A run replaces it with the detector's own
+        # operating point, so Reset means "the model's answer", not "0.50".
+        self.base_threshold = threshold
+        self.worker = None
+        self.sweep_worker = None
+        self.peek_worker = None
+        self.view = TAB_INSIGHTS
 
-        self.setWindowTitle(f"AIGC Detector — {os.path.basename(dataset.root) or 'results'}")
-        self.resize(1440, 900)
-        self.setMinimumSize(1000, 660)
+        self.setWindowTitle("AIGC Detector")
+        self.resize(1400, 900)
+        self.setMinimumSize(1080, 700)
 
-        central = QWidget()
-        root = QVBoxLayout(central)
-        root.setContentsMargins(16, 14, 16, 14)
-        root.setSpacing(12)
+        self.upload_page = UploadPage(self)
 
-        root.addWidget(self._build_header())
-        root.addLayout(self._build_cards())
-        root.addWidget(self._build_threshold())
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        left, right = self._build_left(), self._build_right()
-        # the charts need real estate or matplotlib collapses their axes
-        left.setMinimumWidth(420)
-        right.setMinimumWidth(560)
-        splitter.addWidget(left)
-        splitter.addWidget(right)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([560, 800])
-        root.addWidget(splitter, 1)
-
-        self.setCentralWidget(central)
+        self.screens = QStackedWidget()
+        self.screens.addWidget(self.upload_page)
+        self.screens.addWidget(self._build_results())
+        self.setCentralWidget(self.screens)
 
         self._chart_timer = QTimer(self)
         self._chart_timer.setSingleShot(True)
-        self._chart_timer.timeout.connect(self._draw_charts)
+        self._chart_timer.timeout.connect(lambda: self.refresh(charts=True))
 
-        self.refresh(charts=True)
+        self.go_upload()
 
-    # -- construction ------------------------------------------------------
+        if start_json:
+            self.load_predictions_file(start_json)
+        elif start_dir:
+            # the command line already said what it wanted by naming a folder,
+            # so let the labels decide rather than demanding the tile be clicked
+            self.upload_page.set_directory(start_dir)
+            self.start_run(LabelMode.AUTO)
+
+    # -- results screen ----------------------------------------------------
+    def _build_results(self) -> QWidget:
+        screen = QWidget()
+        outer = QVBoxLayout(screen)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(self._build_header())
+
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(28, 20, 28, 22)
+
+        self.insights_page = InsightsPage(self)
+        self.images_page = ImagesPage(self)
+        self.robustness_page = RobustnessPage(self)
+        self.gallery_page = GalleryPage(self)
+
+        self.stack = QStackedWidget()
+        for w in (self.insights_page, self.images_page, self.robustness_page,
+                  self.gallery_page):
+            self.stack.addWidget(w)
+        lay.addWidget(self.stack, 1)
+        outer.addWidget(body, 1)
+        return screen
+
     def _build_header(self) -> QWidget:
-        card = Card(padding=12)
-        row = QHBoxLayout()
-        row.setSpacing(10)
+        bar = QFrame()
+        bar.setObjectName("header")
+        lay = QVBoxLayout(bar)
+        lay.setContentsMargins(28, 12, 28, 0)
+        lay.setSpacing(8)
 
-        title = QLabel(self.dataset.root or self.result.source)
-        title.setStyleSheet(
-            f"color: {T.TEXT}; font-size: 14px; font-weight: 700; background: transparent;")
-        title.setToolTip(self.result.source)
+        # -- row 1: what is loaded, and what you can do with it
+        top = QHBoxLayout()
+        top.setSpacing(12)
 
-        sub = QLabel(f"{len(self.dataset):,} images  ·  {self.result.detector_display}"
-                     + (f"  ·  scored in {self.result.elapsed:.1f}s"
-                        if self.result.elapsed else ""))
-        sub.setStyleSheet(f"color: {T.TEXT_DIM}; font-size: 11px; background: transparent;")
+        mark = QLabel()                       # the app mark, drawn not typeset
+        mark.setFixedSize(18, 18)
+        mark.setStyleSheet(f"background-color: {T.ACCENT}; border-radius: 5px;")
 
-        left = QVBoxLayout()
-        left.setSpacing(2)
-        left.addWidget(title)
-        left.addWidget(sub)
+        self.source_label = QLabel("")
+        self.source_label.setStyleSheet(
+            f"color: {T.TEXT}; font-size: 16px; font-weight: 700;"
+            " letter-spacing: -0.3px;")
+        self.counts_label = QLabel("")
+        self.counts_label.setStyleSheet(
+            f"color: {T.TEXT_FAINT}; font-size: {C.FS_SMALL}px;")
 
-        row.addLayout(left, 1)
+        self.detector_dot = Dot(T.TEXT_FAINT)
+        self.detector_label = QLabel("")
+        self.detector_label.setStyleSheet(
+            f"color: {T.TEXT_FAINT}; font-size: {C.FS_SMALL}px;")
 
-        if self.result.is_placeholder:
-            row.addWidget(Badge("placeholder backend", T.WARN))
-        if self.dataset.has_labels:
-            row.addWidget(Badge(f"{self.dataset.n_real} real / {self.dataset.n_ai} AI",
-                                T.GOOD))
-        else:
-            row.addWidget(Badge("unlabeled", T.TEXT_DIM))
-
-        self.export_btn = QPushButton("⬇  Export predictions.json")
+        self.new_btn = QPushButton("New upload")
+        self.new_btn.setToolTip("Back to the upload screen")
+        self.new_btn.clicked.connect(self.go_upload)
+        self.export_btn = QPushButton("Export JSON")
         self.export_btn.setProperty("accent", True)
+        self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self.export_json)
-        row.addWidget(self.export_btn)
 
-        card.layout().addLayout(row)
-        return card
+        top.addWidget(mark)
+        top.addWidget(self.source_label)
+        top.addWidget(self.counts_label)
+        top.addSpacing(6)
+        top.addWidget(self.detector_dot)
+        top.addWidget(self.detector_label)
+        top.addStretch(1)
+        top.addWidget(self.new_btn)
+        top.addWidget(self.export_btn)
+        lay.addLayout(top)
 
-    def _build_cards(self) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.setSpacing(10)
-        self.card_acc = StatCard("Accuracy", "at current threshold")
-        self.card_auc = StatCard("ROC AUC", "threshold-independent")
-        self.card_f1 = StatCard("F1", "AI class")
-        self.card_fpr = StatCard("False positives", "authentic flagged as AI")
-        for c in (self.card_acc, self.card_auc, self.card_f1, self.card_fpr):
-            row.addWidget(c)
-        return row
+        # -- row 2: tabs on the left, the threshold on the right
+        bottom = QHBoxLayout()
+        bottom.setSpacing(0)
+
+        self.tab_bar = QWidget()
+        self.tab_bar.setProperty("bare", True)     # it sits on the header
+        tabs = QHBoxLayout(self.tab_bar)
+        tabs.setContentsMargins(0, 0, 0, 0)
+        tabs.setSpacing(0)
+        self.tabs = []
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+        for i, (name, hint) in enumerate(TABS):
+            btn = Tab(name)
+            btn.setToolTip(hint)
+            btn.clicked.connect(lambda _, idx=i: self.go(idx))
+            group.addButton(btn)
+            tabs.addWidget(btn)
+            self.tabs.append(btn)
+        tabs.addStretch(1)
+
+        # an explicit stretch, not the tab strip's - the strip is hidden for
+        # unlabeled data, and a hidden widget hands its space to whatever is
+        # left, which would stretch the threshold controls across the header
+        bottom.addWidget(self.tab_bar)
+        bottom.addStretch(1)
+        bottom.addWidget(self._build_threshold())
+        lay.addLayout(bottom)
+        return bar
 
     def _build_threshold(self) -> QWidget:
-        card = Card(padding=10)
-        row = QHBoxLayout()
+        self.threshold_box = QWidget()
+        self.threshold_box.setProperty("bare", True)
+        row = QHBoxLayout(self.threshold_box)
+        row.setContentsMargins(0, 0, 0, 6)
         row.setSpacing(10)
 
-        row.addWidget(SectionTitle("Threshold"))
-        self.thr_label = QLabel(f"{self.threshold:.2f}")
+        label = QLabel("Threshold")
+        label.setStyleSheet(
+            f"color: {T.TEXT_FAINT}; font-size: {C.FS_SMALL}px; font-weight: 500;")
+        self.thr_label = QLabel(f"{self.threshold:.3f}")
+        self.thr_label.setFixedWidth(48)
         self.thr_label.setStyleSheet(
-            f"color: {T.ACCENT}; font-size: 15px; font-weight: 700; background: transparent;")
+            f"color: {T.TEXT}; font-size: {C.FS_TITLE}px; font-weight: 600;")
         self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setFixedWidth(160)
         self.slider.setRange(0, 1000)
         self.slider.setValue(int(self.threshold * 1000))
         self.slider.valueChanged.connect(self._on_slider)
 
-        best = QPushButton("Best F1")
-        best.clicked.connect(lambda: self._set_threshold(self._best("f1")))
-        half = QPushButton("0.50")
-        half.clicked.connect(lambda: self._set_threshold(0.5))
-        enabled = self.dataset.has_labels
-        best.setEnabled(enabled)
+        self.best_btn = QPushButton("Best F1")
+        self.best_btn.setToolTip("Move the threshold to the value that maximises F1")
+        self.best_btn.clicked.connect(self._best_threshold)
+        self.reset_btn = QPushButton("Reset")
+        self.reset_btn.clicked.connect(
+            lambda: self.set_threshold(self.base_threshold))
+        self._sync_reset_tip()
 
-        row.addWidget(self.thr_label)
-        row.addWidget(self.slider, 1)
-        row.addWidget(best)
-        row.addWidget(half)
-        card.layout().addLayout(row)
-        return card
+        for w in (label, self.thr_label, self.slider, self.best_btn,
+                  self.reset_btn):
+            row.addWidget(w)
+        return self.threshold_box
 
-    def _build_left(self) -> QWidget:
-        panel = QWidget()
-        lay = QVBoxLayout(panel)
-        lay.setContentsMargins(0, 0, 8, 0)
-        lay.setSpacing(8)
+    # -- navigation --------------------------------------------------------
+    def go_upload(self):
+        """Back to the start, with the folder and the choice still in place."""
+        self.screens.setCurrentIndex(SCREEN_UPLOAD)
 
-        chips = QHBoxLayout()
-        chips.setSpacing(6)
-        self.chips = []
-        for i, text in enumerate(["All", "False positives", "False negatives",
-                                  "Flagged AI", "Flagged real"]):
-            chip = Chip(text)
-            chip.clicked.connect(lambda _, idx=i: self._set_filter(idx))
-            chips.addWidget(chip)
-            self.chips.append(chip)
-        self.chips[0].setChecked(True)
-        chips.addStretch(1)
-        self.count_label = QLabel("")
-        self.count_label.setStyleSheet(f"color: {T.TEXT_FAINT}; background: transparent;")
-        chips.addWidget(self.count_label)
-        lay.addLayout(chips)
+    def go(self, index: int):
+        self.view = index
+        self.stack.setCurrentIndex(index)
+        for i, btn in enumerate(self.tabs):
+            btn.setChecked(i == index)
+        self.threshold_box.setVisible(index in THRESHOLD_VIEWS)
+        page = self.stack.currentWidget()
+        if hasattr(page, "refresh"):
+            page.refresh()
 
-        self.model = ResultsModel(self)
-        self.proxy = QSortFilterProxyModel(self)
-        self.proxy.setSourceModel(self.model)
-        self.proxy.setSortRole(Qt.ItemDataRole.UserRole)
+    def show_results(self):
+        """Route to the screen the data actually supports."""
+        labeled = self.dataset is not None and self.dataset.has_labels
+        self.tab_bar.setVisible(labeled)
+        self.screens.setCurrentIndex(SCREEN_RESULTS)
+        self.go(TAB_INSIGHTS if labeled else VIEW_GALLERY)
 
-        self.table = QTableView()
-        self.table.setModel(self.proxy)
-        self.table.setSortingEnabled(True)
-        self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setItemDelegateForColumn(1, ScoreBarDelegate(self.table))
-        self.table.setWordWrap(False)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for c in range(1, len(COLUMNS)):
-            header.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.clicked.connect(self._on_row_clicked)
-        lay.addWidget(self.table, 1)
-
-        lay.addWidget(self._build_preview())
-        return panel
-
-    def _build_preview(self) -> QWidget:
-        card = Card(padding=10)
-        card.setMaximumHeight(148)
-        row = QHBoxLayout()
-        row.setSpacing(12)
-
-        self.preview = QLabel("Click a row to preview")
-        self.preview.setFixedSize(126, 126)
-        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview.setStyleSheet(
-            f"background-color: #17171C; border: 1px solid {T.BORDER};"
-            f" border-radius: 8px; color: {T.TEXT_FAINT}; font-size: 11px;")
-
-        self.preview_score = QLabel("")
-        self.preview_score.setStyleSheet(
-            f"color: {T.TEXT_FAINT}; font-size: 19px; font-weight: 700;"
-            " background: transparent;")
-        self.preview_meta = QLabel("")
-        self.preview_meta.setWordWrap(True)
-        self.preview_meta.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.preview_meta.setStyleSheet(
-            f"color: {T.TEXT_DIM}; font-size: 11px; background: transparent;")
-
-        info = QVBoxLayout()
-        info.setSpacing(4)
-        info.addWidget(self.preview_score)
-        info.addWidget(self.preview_meta)
-        info.addStretch(1)
-
-        row.addWidget(self.preview)
-        row.addLayout(info, 1)
-        card.layout().addLayout(row)
-        return card
-
-    def _build_right(self) -> QWidget:
-        panel = QWidget()
-        grid = QGridLayout(panel)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(10)
-
-        self.chart_hist = MplCanvas()
-        self.chart_roc = MplCanvas()
-        self.chart_cm = MplCanvas()
-        self.chart_robust = MplCanvas()
-
-        for canvas, pos in ((self.chart_hist, (0, 0)), (self.chart_roc, (0, 1)),
-                            (self.chart_cm, (1, 0)), (self.chart_robust, (1, 1))):
-            wrapper = Card(padding=6)
-            wrapper.layout().addWidget(canvas)
-            grid.addWidget(wrapper, *pos)
-        grid.setRowStretch(0, 1)
-        grid.setRowStretch(1, 1)
-        return panel
-
-    # -- interaction -------------------------------------------------------
+    # -- state helpers -----------------------------------------------------
     def score_at(self, di: int):
-        if di < 0 or di >= len(self.result.scores):
+        if self.result is None or di < 0 or di >= len(self.result.scores):
             return None
         s = self.result.scores[di]
         return None if s is None or math.isnan(s) else s
 
+    def set_threshold(self, t: float):
+        self.slider.setValue(int(round(min(max(t, 0.0), 1.0) * 1000)))
+
+    def _sync_reset_tip(self):
+        why = (", the detector's own operating point"
+               if self.result is not None else "")
+        self.reset_btn.setToolTip(f"Back to {self.base_threshold:.3f}{why}")
+
     def _on_slider(self, value: int):
         self.threshold = value / 1000.0
-        self.thr_label.setText(f"{self.threshold:.2f}")
+        self.thr_label.setText(f"{self.threshold:.3f}")
         self.refresh(charts=False)
         self._chart_timer.start(140)
 
-    def _set_threshold(self, t: float):
-        self.slider.setValue(int(round(t * 1000)))
-
-    def _best(self, criterion: str) -> float:
+    def _best_threshold(self):
+        if self.result is None or self.dataset is None:
+            return
         y, s = self.result.valid_pairs(self.dataset)
         if len(set(y)) < 2:
-            return self.threshold
-        return M.best_threshold(y, s, criterion)
+            return
+        self.set_threshold(M.best_threshold(y, s, "f1"))
 
-    def _set_filter(self, idx: int):
-        self._filter = idx
-        for i, chip in enumerate(self.chips):
-            chip.setChecked(i == idx)
-        self.refresh(charts=False)
-
-    def _on_row_clicked(self, index):
-        src = self.proxy.mapToSource(index)
-        di = self.model.data(self.model.index(src.row(), 0), Qt.ItemDataRole.UserRole + 2)
-        if di is not None:
-            self._show_preview(int(di))
-
-    # -- refresh -----------------------------------------------------------
     def refresh(self, charts: bool = True):
-        self._rebuild_rows()
-        self._update_cards()
+        self.insights_page.refresh(charts=charts)
+        self.images_page.refresh()
+        self.gallery_page.refresh()
         if charts:
-            self._draw_charts()
-        if self._selected >= 0:
-            self._show_preview(self._selected)
+            self.robustness_page.refresh()
 
-    def _rebuild_rows(self):
-        rows = []
-        for di, item in enumerate(self.dataset.items):
-            score = self.score_at(di)
-            pred = None if score is None else int(score >= self.threshold)
-            f = self._filter
-            if f == FILTER_ALL:
-                keep = True
-            elif f == FILTER_AI:
-                keep = pred == 1
-            elif f == FILTER_REAL:
-                keep = pred == 0
-            elif item.label is None or pred is None:
-                keep = False
-            elif f == FILTER_FP:
-                keep = pred == 1 and item.label == 0
-            else:
-                keep = pred == 0 and item.label == 1
-            if keep:
-                rows.append(di)
-        self.model.set_rows(rows)
-        self.count_label.setText(f"{len(rows):,} of {len(self.dataset):,}")
+    def _sync_header(self):
+        if self.dataset is None:
+            self.source_label.setText("")
+            self.counts_label.setText("")
+            self.detector_label.setText("")
+            self.detector_dot.set_color(T.TEXT_FAINT)
+            self.export_btn.setEnabled(False)
+            self.best_btn.setEnabled(False)
+            return
 
-    def _update_cards(self):
+        source = self.dataset.root or (self.result.source if self.result else "")
+        self.source_label.setText(os.path.basename(source.rstrip("\\/")) or source)
+        self.source_label.setToolTip(source)
+
+        counts = f"{len(self.dataset):,} images"
+        counts += (f"   ·   {self.dataset.n_real:,} real / {self.dataset.n_ai:,} AI"
+                   if self.dataset.has_labels else "   ·   unlabeled")
+        self.counts_label.setText(counts)
+
+        if self.result is not None:
+            self.detector_label.setText(
+                self.result.detector_display.replace(" (placeholder)", ""))
+            placeholder = self.result.is_placeholder
+            self.detector_dot.set_color(T.WARN if placeholder else T.GOOD)
+            tip = ("Placeholder backend — these scores are not real detections."
+                   if placeholder else "Model backend")
+            if self.result.elapsed:
+                tip += f"\nScored in {self.result.elapsed:.1f}s"
+            self.detector_dot.setToolTip(tip)
+            self.detector_label.setToolTip(tip)
+
+        self.export_btn.setEnabled(self.result is not None and self.result.n_scored > 0)
+        self.best_btn.setEnabled(self.dataset.has_labels)
+
+    # -- running -----------------------------------------------------------
+    def start_run(self, label_mode: LabelMode = None):
+        if self.worker is not None:
+            return
+        directory = self.upload_page.directory
+        if not directory or not os.path.isdir(directory):
+            QMessageBox.information(self, "No folder",
+                                    "Pick an image folder to score.")
+            return
+        if label_mode is None:
+            label_mode = self.upload_page.label_mode
+
+        runner.log("")
+        runner.log(f"=== Detect {directory} ===")
+
+        self.upload_page.set_busy(True, "Working — detailed progress in the terminal.")
+        self.worker = ScoreWorker(directory, self.upload_page.detector_name,
+                                  self.upload_page.weights, label_mode, parent=self)
+        self.worker.finished_ok.connect(self._on_run_done)
+        self.worker.failed.connect(self._on_run_failed)
+        self.worker.start()
+
+    def peek_directory(self, directory: str):
+        """Scan a folder in the background so the upload screen can describe it.
+
+        Scanning is cheap next to scoring, and it is what tells you whether the
+        folder can support the kind of upload you just declared - before you
+        spend a run finding out.
+        """
+        if self.peek_worker is not None:
+            self.peek_worker.wait(0)      # a stale scan just loses the race
+        self.peek_worker = ScanWorker(directory, parent=self)
+        self.peek_worker.finished_ok.connect(self._on_peek_done)
+        self.peek_worker.failed.connect(lambda _msg: setattr(self, "peek_worker", None))
+        self.peek_worker.start()
+
+    def _on_peek_done(self, dataset):
+        self.peek_worker = None
+        self.upload_page.set_peek(dataset)
+
+    def load_predictions_file(self, path: str):
+        if self.worker is not None:
+            return
+        runner.log("")
+        runner.log(f"=== Open {path} ===")
+        self.upload_page.set_busy(True, "Reading predictions…")
+        self.worker = LoadWorker(path, parent=self)
+        self.worker.finished_ok.connect(self._on_run_done)
+        self.worker.failed.connect(self._on_run_failed)
+        self.worker.start()
+
+    def _on_run_done(self, dataset, result):
+        self.worker = None
+        self.dataset = dataset
+        self.result = result
+        self.robustness = {}
+
+        # Adopt the detector's operating point. The calibrated model's is not
+        # 0.5, and leaving the slider there would call every image AI.
+        self.base_threshold = float(result.threshold)
+        self._sync_reset_tip()
+        self.set_threshold(self.base_threshold)
+
+        runner.summarize(dataset, result, self.threshold, total_steps=4, step_no=4)
+
+        # a sweep report sitting next to the data is picked up for free
+        report = os.path.join(dataset.root or "", SW.DEFAULT_REPORT)
+        view = SW.load_report_view(report) if dataset.root else {}
+        if view and dataset.has_labels:
+            self.robustness = view
+            runner.log(f"      robustness report loaded from "
+                       f"{os.path.basename(report)}", indent=0)
+
+        self.upload_page.set_busy(False, "")
+        self._sync_header()
+        self.refresh(charts=True)
+        self.show_results()
+
+    def _on_run_failed(self, message: str):
+        self.worker = None
+        self.upload_page.set_busy(False, "Failed.")
+        QMessageBox.critical(self, "Run failed", message)
+
+    # -- sweep -------------------------------------------------------------
+    def start_sweep(self):
+        if self.sweep_worker is not None:
+            return
+        if self.dataset is None:
+            QMessageBox.information(self, "Nothing loaded",
+                                    "Upload a folder first.")
+            return
         if not self.dataset.has_labels:
-            for card in (self.card_acc, self.card_auc, self.card_f1, self.card_fpr):
-                card.set_value("—", "no ground-truth labels")
-            flagged = sum(1 for di in range(len(self.dataset))
-                          if (self.score_at(di) or 0) >= self.threshold)
-            self.card_acc.set_value(f"{flagged:,}", "images flagged as AI")
-            self.card_acc.title_label.setText("FLAGGED AI")
+            QMessageBox.information(
+                self, "Labels required",
+                "The sweep measures accuracy, so it needs ground-truth labels.\n\n"
+                "Use real/ and ai/ subfolders, a labels.csv, or real_/ai_ prefixes.")
+            return
+        cells = self.robustness_page.selected_cells()
+        if not cells:
+            QMessageBox.information(self, "Nothing selected",
+                                    "Tick at least one transform.")
             return
 
-        m = M.compute_metrics(*self.result.valid_pairs(self.dataset), self.threshold)
-        self.card_acc.set_value(M.fmt(m.accuracy), f"{m.tp + m.tn} of {m.n} correct")
-        self.card_auc.set_value(M.fmt(m.auc, pct=False), "1.0 = perfect ranking")
-        self.card_f1.set_value(M.fmt(m.f1, pct=False),
-                               f"P {M.fmt(m.precision)} · R {M.fmt(m.recall)}")
-        self.card_fpr.set_value(
-            M.fmt(m.fpr), f"{m.fp} of {m.tn + m.fp} authentic",
-            color=T.BAD if (m.fpr == m.fpr and m.fpr > 0.10) else T.TEXT)
+        runner.log("")
+        runner.log(f"=== Robustness sweep: {len(cells) + 1} cells ===")
+        self.robustness_page.set_busy(True, "Sweeping — progress in the terminal.")
+        self.sweep_worker = SweepWorker(
+            self.dataset, self.upload_page.detector_name, cells,
+            self.robustness_page.sample_spin.value(),
+            self.robustness_page.side_spin.value(),
+            self.threshold, self.upload_page.weights, parent=self)
+        self.sweep_worker.cell_done.connect(
+            lambda i, n, name: self.robustness_page.set_busy(True, f"{i}/{n}  {name}"))
+        self.sweep_worker.finished_ok.connect(self._on_sweep_done)
+        self.sweep_worker.failed.connect(self._on_sweep_failed)
+        self.sweep_worker.start()
 
-    def _draw_charts(self):
-        y, s = self.result.valid_pairs(self.dataset)
-        unlabeled = [sc for it, sc in zip(self.dataset.items, self.result.scores)
-                     if it.label is None and not math.isnan(sc)]
-        self.chart_hist.plot_score_histogram(y, s, self.threshold, unlabeled)
-        self.chart_roc.plot_roc(y, s)
-        self.chart_cm.plot_confusion(
-            M.compute_metrics(y, s, self.threshold) if y else M.Metrics())
-        self._draw_robustness()
+    def cancel_sweep(self):
+        if self.sweep_worker is not None:
+            self.sweep_worker.cancel()
+            self.robustness_page.set_busy(True, "Cancelling…")
 
-    def _draw_robustness(self):
-        if not self.robustness:
-            self.chart_robust.clear_to_message(
-                "No robustness report loaded\n\nrun:  python robustness.py <dir>")
-            return
-        series = self.robustness.get("series", {})
-        baseline = self.robustness.get("baseline", float("nan"))
-        metric = self.robustness.get("metric", "Accuracy")
-        self.chart_robust.plot_degradation(series, baseline, metric)
+    def _on_sweep_done(self, result):
+        self.sweep_worker = None
+        self.robustness = result.to_view()
+        path = os.path.join(self.dataset.root, SW.DEFAULT_REPORT)
+        try:
+            written = result.write(path)
+            runner.log(f"      report -> {written}")
+        except Exception as exc:
+            runner.warn(f"could not write the report: {exc}")
+        self.robustness_page.set_busy(
+            False, f"{len(result.cells)} cells in {result.elapsed:.1f}s")
+        self.robustness_page.refresh()
 
-    def _show_preview(self, di: int):
-        self._selected = di
-        item = self.dataset.items[di]
-        score = self.score_at(di)
-
-        pix = QPixmap(item.path)
-        if pix.isNull():
-            self.preview.setText("no preview")
-            self.preview.setPixmap(QPixmap())
-        else:
-            self.preview.setPixmap(pix.scaled(
-                self.preview.width() - 6, self.preview.height() - 6,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation))
-
-        if score is None:
-            self.preview_score.setText("—")
-            self.preview_score.setStyleSheet(
-                f"color: {T.TEXT_FAINT}; font-size: 19px; font-weight: 700;"
-                " background: transparent;")
-        else:
-            verdict = "AI-generated" if score >= self.threshold else "authentic"
-            self.preview_score.setText(f"{score:.4f}  ·  {verdict}")
-            self.preview_score.setStyleSheet(
-                f"color: {score_color(score)}; font-size: 19px; font-weight: 700;"
-                " background: transparent;")
-
-        dims = f"{pix.width()}×{pix.height()}" if not pix.isNull() else "?"
-        self.preview_meta.setText(
-            f"<b>{item.name}</b><br>{item.rel_path}<br>"
-            f"{dims} · {item.size_bytes / 1024:.0f} KB<br>"
-            f"ground truth: {_label_text(item.label)}")
+    def _on_sweep_failed(self, message: str):
+        self.sweep_worker = None
+        self.robustness_page.set_busy(False, "Failed.")
+        QMessageBox.critical(self, "Sweep failed", message)
 
     # -- export ------------------------------------------------------------
     def export_json(self):
+        if self.result is None:
+            return
         default = os.path.join(self.dataset.root or os.path.expanduser("~"),
                                "predictions.json")
         path, _ = QFileDialog.getSaveFileName(self, "Export predictions", default,
@@ -510,6 +475,14 @@ class ResultsWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
             return
-        print(f"  wrote {n:,} predictions to {path}", flush=True)
-        QMessageBox.information(self, "Exported",
-                                f"Wrote {n:,} records to:\n{path}")
+        runner.log(f"      wrote {n:,} predictions -> {os.path.abspath(path)}")
+        QMessageBox.information(self, "Exported", f"Wrote {n:,} records to:\n{path}")
+
+    # -- shutdown ----------------------------------------------------------
+    def closeEvent(self, event):
+        for w in (self.worker, self.sweep_worker, self.peek_worker):
+            if w is not None:
+                if hasattr(w, "cancel"):
+                    w.cancel()
+                w.wait(3000)
+        super().closeEvent(event)

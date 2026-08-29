@@ -10,15 +10,25 @@ from PyQt6.QtWidgets import (
 from .. import theme as T
 
 
-class Card(QFrame):
-    """Rounded surface used as a container everywhere."""
+#: one type scale, used everywhere - no arbitrary sizes
+FS_MICRO, FS_SMALL, FS_BODY, FS_TITLE, FS_VALUE = 10, 11, 13, 15, 28
 
-    def __init__(self, parent=None, padding: int = 14):
+
+class Card(QFrame):
+    """The container surface, one step above the page ground.
+
+    Both cues stay on by default - the lighter fill and the hairline. A Qt
+    stylesheet has no shadows, and on a dark ground a fill difference this
+    small is not enough on its own to say where a panel ends.
+    """
+
+    def __init__(self, parent=None, padding: int = 14, bordered: bool = True):
         super().__init__(parent)
         self.setObjectName("card")
+        border = f"1px solid {T.BORDER}" if bordered else "none"
         self.setStyleSheet(
-            f"#card {{ background-color: {T.CARD}; border: 1px solid {T.BORDER};"
-            f" border-radius: 10px; }}"
+            f"#card {{ background-color: {T.CARD}; border: {border};"
+            f" border-radius: {T.R_CARD}px; }}"
         )
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(padding, padding, padding, padding)
@@ -29,43 +39,50 @@ class Card(QFrame):
 
 
 class StatCard(Card):
-    """Big-number metric tile."""
+    """Big-number metric tile: label, value, one short sub-line.
 
-    def __init__(self, title: str, hint: str = "", parent=None):
-        super().__init__(parent, padding=14)
-        self.setMinimumWidth(140)
+    The label is sentence case at reading size. Small caps with tracking is the
+    reflex for a tile like this, and it costs legibility at 10px for nothing.
+    """
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent, padding=16, bordered=True)
+        self.setMinimumWidth(130)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-        self.title_label = QLabel(title.upper())
+        self.title_label = QLabel(title)
         self.title_label.setStyleSheet(
-            f"color: {T.TEXT_FAINT}; font-size: 10px; font-weight: 700;"
-            " letter-spacing: 1px; background: transparent;"
+            f"color: {T.TEXT_FAINT}; font-size: {FS_SMALL}px; font-weight: 500;"
+            " background: transparent;"
         )
 
         self.value_label = QLabel("—")
-        self.value_label.setStyleSheet(
-            f"color: {T.TEXT}; font-size: 26px; font-weight: 700; background: transparent;"
-        )
+        self._paint_value(T.TEXT)
 
-        self.sub_label = QLabel(hint)
+        self.sub_label = QLabel("")
         self.sub_label.setStyleSheet(
-            f"color: {T.TEXT_DIM}; font-size: 11px; background: transparent;"
+            f"color: {T.TEXT_FAINT}; font-size: {FS_SMALL}px; background: transparent;"
         )
-        self.sub_label.setWordWrap(True)
 
+        self._layout.setSpacing(3)
         self._layout.addWidget(self.title_label)
         self._layout.addWidget(self.value_label)
         self._layout.addWidget(self.sub_label)
-        self._layout.setSpacing(2)
+
+    def _paint_value(self, color: str):
+        self.value_label.setStyleSheet(
+            f"color: {color}; font-size: {FS_VALUE}px; font-weight: 600;"
+            " letter-spacing: -0.4px; background: transparent;"
+        )
 
     def set_value(self, text: str, sub: str = None, color: str = None):
         self.value_label.setText(text)
-        self.value_label.setStyleSheet(
-            f"color: {color or T.TEXT}; font-size: 26px; font-weight: 700;"
-            " background: transparent;"
-        )
+        self._paint_value(color or T.TEXT)
         if sub is not None:
             self.sub_label.setText(sub)
+
+    def set_title(self, text: str):
+        self.title_label.setText(text)
 
 
 class Badge(QLabel):
@@ -75,10 +92,22 @@ class Badge(QLabel):
 
     def set_color(self, color: str):
         self.setStyleSheet(
-            f"color: {color}; background-color: rgba(255,255,255,0.05);"
-            f" border: 1px solid {T.BORDER}; border-radius: 10px;"
+            f"color: {color}; background-color: {T.RAISED};"
+            f" border: 1px solid {T.BORDER_STRONG}; border-radius: 10px;"
             " padding: 3px 10px; font-size: 11px; font-weight: 600;"
         )
+
+
+class Dot(QLabel):
+    """6px status dot - says what a sentence of label text used to say."""
+
+    def __init__(self, color: str = T.TEXT_FAINT, parent=None):
+        super().__init__("", parent)
+        self.setFixedSize(8, 8)
+        self.set_color(color)
+
+    def set_color(self, color: str):
+        self.setStyleSheet(f"background-color: {color}; border-radius: 4px;")
 
 
 class Chip(QPushButton):
@@ -89,11 +118,28 @@ class Chip(QPushButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
 
+class Tab(QPushButton):
+    """Header tab - an underline and a weight change, no chrome of its own."""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.setCheckable(True)
+        self.setProperty("tab", True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+
 class SectionTitle(QLabel):
+    """Rule-in for a group of controls - quieter than a heading.
+
+    Sentence case, reading size. The controls underneath carry the weight; the
+    label only has to say what they are.
+    """
+
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
         self.setStyleSheet(
-            f"color: {T.TEXT}; font-size: 14px; font-weight: 700; background: transparent;"
+            f"color: {T.TEXT_DIM}; font-size: {FS_SMALL}px; font-weight: 600;"
+            " background: transparent;"
         )
 
 
@@ -102,7 +148,7 @@ class Hint(QLabel):
         super().__init__(text, parent)
         self.setWordWrap(True)
         self.setStyleSheet(
-            f"color: {T.TEXT_DIM}; font-size: 11px; background: transparent;"
+            f"color: {T.TEXT_DIM}; font-size: {FS_SMALL}px; background: transparent;"
         )
 
 
@@ -113,8 +159,9 @@ class PlaceholderBanner(QFrame):
         super().__init__(parent)
         self.setObjectName("banner")
         self.setStyleSheet(
-            f"#banner {{ background-color: rgba(245,166,35,0.10);"
-            f" border: 1px solid rgba(245,166,35,0.45); border-radius: 8px; }}"
+            f"#banner {{ background-color: {T.WARN_BG};"
+            f" border: 1px solid {T.WARN_BORDER};"
+            f" border-radius: {T.R_CARD}px; }}"
         )
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 8, 12, 8)

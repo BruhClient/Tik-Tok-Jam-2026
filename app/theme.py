@@ -1,28 +1,106 @@
-"""Dark theme: palette constants, Qt stylesheet, matplotlib rcParams."""
+"""Dark theme: palette constants, Qt stylesheet, matplotlib rcParams.
+
+A neutral charcoal ramp - no blue or violet anywhere in the greys, which is
+what makes most dark interfaces read cold. Surfaces sit one step above the
+ground and carry a hairline; that pair is the only depth cue, since a Qt
+stylesheet has no shadows to lean on.
+
+Text contrast is measured against the ground rather than guessed:
+
+    TEXT        14.9:1     anything you actually read
+    TEXT_DIM     7.2:1     secondary lines, still comfortable
+    TEXT_FAINT   5.1:1     labels and captions - the floor for information
+    TEXT_MUTED   2.7:1     disabled only, and never the sole carrier of meaning
+
+Fills that carry text are measured the same way - see the accent block below.
+
+Colour is reserved for meaning: the accent marks the one primary action on a
+screen, and real/AI keep their two hues everywhere they appear - charts, table,
+gallery, preview. Everything else is greyscale and space.
+
+Every value the stylesheet needs is named here. Nothing below hardcodes a hex,
+so this block is the only thing to edit.
+"""
 
 from __future__ import annotations
 
-BG = "#0E0E10"
-SURFACE = "#141418"
-CARD = "#1C1C21"
-CARD_HOVER = "#24242B"
-BORDER = "#2A2A32"
-TEXT = "#EDEDF0"
-TEXT_DIM = "#9A9AA6"
-TEXT_FAINT = "#6B6B78"
+# ---- ground and surfaces --------------------------------------------------
+BG = "#121316"          # page ground
+SURFACE = "#191A1E"     # header, panels, tables - one step up from the ground
+CARD = "#191A1E"
+RAISED = "#202227"      # buttons, hovered rows, tiles
+CARD_HOVER = "#202227"
+PRESSED = "#26282D"
+TRACK = "#232529"       # inert fill: score-bar troughs, image letterbox
+BORDER = "#2A2C32"
+BORDER_STRONG = "#383B43"
+BORDER_HOVER = "#474B54"
 
-ACCENT = "#FE2C55"
-ACCENT_DIM = "#C4213F"
-SECONDARY = "#25F4EE"
-WARN = "#F5A623"
-GOOD = "#3DD68C"
-BAD = "#FF5C5C"
+# ---- text -----------------------------------------------------------------
+TEXT = "#E7E9EC"
+TEXT_DIM = "#9CA3AC"
+TEXT_FAINT = "#828892"
+TEXT_MUTED = "#565B63"  # disabled; deliberately below reading contrast
 
-REAL_COLOR = "#25F4EE"
-AI_COLOR = "#FE2C55"
+# ---- accent ---------------------------------------------------------------
+# The brand red splits in two, because one value cannot do both jobs on a dark
+# ground: bright enough to read as a line against the ground is too bright to
+# carry white text. ACCENT is the hue - marks, underlines, the slider, chart
+# lines - and never has text on it. ACCENT_FILL is the button, and does.
+ACCENT = "#FE2C55"           # 5.1:1 on the ground
+ACCENT_TEXT = "#FF7089"      # accent as text, 7.0:1
+ACCENT_SOFT = "#2A1B21"      # tinted fill behind a selected row
+
+# the fill darkens on hover rather than brightening: white type on it only
+# gets easier to read that way, and it still reads as pressing in
+ACCENT_FILL = "#E5163F"      # white on it 4.7:1, itself 4.0:1 on the ground
+ACCENT_FILL_HOVER = "#D50D36"
+ACCENT_FILL_PRESSED = "#C90B31"
+ACCENT_MUTED = "#4A2029"     # the accent button, disabled
+ON_ACCENT = "#FFFFFF"        # text on a solid accent fill
+
+# ---- status ---------------------------------------------------------------
+SECONDARY = "#22D3C5"
+WARN = "#E0A32E"
+GOOD = "#3FB950"
+BAD = "#F85149"
+
+WARN_BG = "#241D0C"          # the placeholder banner
+WARN_BORDER = "#3E3316"
+
+REAL_COLOR = "#22D3C5"       # authentic
+AI_COLOR = "#FE2C55"         # generated
+
+# ---- scrollbars -----------------------------------------------------------
+SCROLL = "#34373D"
+SCROLL_HOVER = "#454951"
+
+# ---- geometry -------------------------------------------------------------
+#: four radii for the whole app. One uniform soft corner on every surface was
+#: the loudest thing about the old look; a card and a checkbox are not the
+#: same kind of object and should not round the same way.
+R_CARD = 10             # cards, panels, tiles
+R_VIEW = 8              # tables and lists
+R_CTRL = 6              # buttons, inputs
+R_TINY = 4              # checkboxes, bars, small chrome
 
 FONT_STACK = '"Segoe UI", "Inter", "SF Pro Text", system-ui, sans-serif'
 MONO_STACK = '"Cascadia Mono", "Consolas", "SF Mono", monospace'
+
+
+def contrast_text(fill: str) -> str:
+    """Pick text that reads on an arbitrary fill.
+
+    The verdict pills use the real/AI hues at full strength, and those two sit
+    on opposite sides of the line - white reads on the red but not on the
+    teal. Rather than hardcode one colour per pill, measure the fill.
+    """
+    channels = []
+    for raw in (int(fill[i:i + 2], 16) / 255 for i in (1, 3, 5)):
+        channels.append(raw / 12.92 if raw <= 0.04045
+                        else ((raw + 0.055) / 1.055) ** 2.4)
+    luminance = 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+    return BG if luminance > 0.35 else ON_ACCENT
 
 
 STYLESHEET = f"""
@@ -40,77 +118,170 @@ QMainWindow, QDialog {{
     background-color: {BG};
 }}
 
-/* ---------- Toolbar ---------- */
-QToolBar {{
+/* labels sit on cards as often as on the page ground - never let one paint
+   its own rectangle, or it carries the wrong background around with it */
+QLabel {{
+    background: transparent;
+}}
+
+/* Same trap one level up: a QWidget that exists only to hold a layout still
+   matches the rule above and paints the ground. That is invisible while it
+   sits on the ground and obvious the moment it sits on a header or a card,
+   so any such container is marked bare and paints nothing. Children do not
+   carry the property, so their own rules are untouched. */
+QWidget[bare="true"] {{
+    background: transparent;
+}}
+QSlider {{
+    background: transparent;
+}}
+
+/* ---------- Results header ---------- */
+QFrame#header {{
     background-color: {SURFACE};
     border: none;
     border-bottom: 1px solid {BORDER};
-    padding: 8px 12px;
-    spacing: 8px;
 }}
-QToolBar QLabel {{
+QFrame#header QLabel {{
+    background: transparent;
+}}
+
+/* Tabs live in the header, so they are buttons rather than a QTabBar - an
+   underline and a weight change, no chrome of their own */
+QPushButton[tab="true"] {{
+    padding: 9px 2px;
+    margin-right: 22px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    background-color: transparent;
     color: {TEXT_DIM};
-    padding: 0 4px;
+    font-size: 13px;
+    font-weight: 500;
+}}
+QPushButton[tab="true"]:hover {{
+    color: {TEXT};
+}}
+QPushButton[tab="true"]:checked {{
+    color: {TEXT};
+    border-bottom: 2px solid {ACCENT};
+    font-weight: 600;
+}}
+QPushButton[tab="true"]:disabled {{
+    color: {TEXT_MUTED};
+}}
+
+/* Borderless text button - a link, for the secondary way into the app */
+QPushButton[link="true"] {{
+    border: none;
+    background: transparent;
+    padding: 4px 2px;
+    color: {TEXT_DIM};
+    font-weight: 500;
+}}
+QPushButton[link="true"]:hover {{
+    color: {ACCENT_TEXT};
+    background: transparent;
+}}
+QPushButton[link="true"]:disabled {{
+    color: {TEXT_MUTED};
+    background: transparent;
+}}
+
+/* The two upload choices. A QFrame has no :checked, so the selected look is
+   applied from Python - only the resting and hover states live here */
+QFrame[tile="true"] {{
+    background-color: {RAISED};
+    border: 1px solid {BORDER};
+    border-radius: {R_CARD}px;
+}}
+QFrame[tile="true"]:hover {{
+    border-color: {BORDER_HOVER};
+}}
+QFrame[tile="true"] QLabel {{
+    background: transparent;
 }}
 
 /* ---------- Buttons ---------- */
 QPushButton {{
-    background-color: {CARD};
-    border: 1px solid {BORDER};
-    border-radius: 6px;
+    background-color: {RAISED};
+    border: 1px solid {BORDER_STRONG};
+    border-radius: {R_CTRL}px;
     padding: 7px 14px;
     color: {TEXT};
+    font-weight: 500;
 }}
 QPushButton:hover {{
-    background-color: {CARD_HOVER};
-    border-color: #3A3A45;
+    background-color: {PRESSED};
+    border-color: {BORDER_HOVER};
 }}
 QPushButton:pressed {{
-    background-color: #121216;
+    background-color: {TRACK};
 }}
 QPushButton:disabled {{
-    color: {TEXT_FAINT};
-    background-color: #16161A;
-    border-color: #222228;
+    color: {TEXT_MUTED};
+    background-color: {SURFACE};
+    border-color: {BORDER};
 }}
 QPushButton[accent="true"] {{
-    background-color: {ACCENT};
-    border: 1px solid {ACCENT};
-    color: #FFFFFF;
+    background-color: {ACCENT_FILL};
+    border: 1px solid {ACCENT_FILL};
+    color: {ON_ACCENT};
     font-weight: 600;
 }}
 QPushButton[accent="true"]:hover {{
-    background-color: #FF4569;
-    border-color: #FF4569;
+    background-color: {ACCENT_FILL_HOVER};
+    border-color: {ACCENT_FILL_HOVER};
+}}
+QPushButton[accent="true"]:pressed {{
+    background-color: {ACCENT_FILL_PRESSED};
+    border-color: {ACCENT_FILL_PRESSED};
 }}
 QPushButton[accent="true"]:disabled {{
-    background-color: #4A1A26;
-    border-color: #4A1A26;
-    color: #8A6672;
+    background-color: {ACCENT_MUTED};
+    border-color: {ACCENT_MUTED};
+    color: {TEXT_MUTED};
 }}
 QPushButton[chip="true"] {{
     border-radius: 13px;
     padding: 5px 14px;
-    background-color: {CARD};
+    background-color: {RAISED};
+    border: 1px solid {BORDER_STRONG};
     color: {TEXT_DIM};
 }}
+QPushButton[chip="true"]:hover {{
+    background-color: {PRESSED};
+    color: {TEXT};
+}}
 QPushButton[chip="true"]:checked {{
-    background-color: {ACCENT};
-    border-color: {ACCENT};
-    color: #FFFFFF;
+    background-color: {TEXT};
+    border-color: {TEXT};
+    color: {BG};
     font-weight: 600;
 }}
 
 /* ---------- Inputs ---------- */
+/* inputs recede into the ground rather than lifting off it, so the field
+   reads as a hole to type into and the buttons beside it stay the raised
+   things on the row */
 QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox {{
-    background-color: {CARD};
-    border: 1px solid {BORDER};
-    border-radius: 6px;
-    padding: 6px 10px;
+    background-color: {BG};
+    border: 1px solid {BORDER_STRONG};
+    border-radius: {R_CTRL}px;
+    padding: 7px 10px;
     selection-background-color: {ACCENT};
+    selection-color: {ON_ACCENT};
 }}
-QComboBox:hover, QLineEdit:hover {{
-    border-color: #3A3A45;
+QComboBox:hover, QLineEdit:hover, QSpinBox:hover {{
+    border-color: {BORDER_HOVER};
+}}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{
+    border-color: {ACCENT};
+}}
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{
+    background-color: {SURFACE};
+    color: {TEXT_MUTED};
+    border-color: {BORDER};
 }}
 QComboBox::drop-down {{
     border: none;
@@ -124,22 +295,45 @@ QComboBox::down-arrow {{
     margin-right: 8px;
 }}
 QComboBox QAbstractItemView {{
-    background-color: {CARD};
-    border: 1px solid {BORDER};
-    selection-background-color: {ACCENT};
+    background-color: {RAISED};
+    border: 1px solid {BORDER_STRONG};
+    border-radius: {R_CTRL}px;
+    selection-background-color: {PRESSED};
+    selection-color: {TEXT};
     outline: none;
     padding: 4px;
 }}
 
+QRadioButton {{
+    spacing: 9px;
+    background: transparent;
+    padding: 2px 0;
+}}
+QRadioButton::indicator {{
+    width: 15px;
+    height: 15px;
+    border-radius: 8px;
+    border: 1px solid {BORDER_STRONG};
+    background-color: {BG};
+}}
+QRadioButton::indicator:hover {{
+    border-color: {ACCENT};
+}}
+QRadioButton::indicator:checked {{
+    border: 4px solid {ACCENT};
+    background-color: {BG};
+}}
+
 QCheckBox {{
     spacing: 8px;
+    background: transparent;
 }}
 QCheckBox::indicator {{
     width: 16px;
     height: 16px;
-    border-radius: 4px;
-    border: 1px solid {BORDER};
-    background-color: {CARD};
+    border-radius: {R_TINY}px;
+    border: 1px solid {BORDER_STRONG};
+    background-color: {BG};
 }}
 QCheckBox::indicator:checked {{
     background-color: {ACCENT};
@@ -149,17 +343,17 @@ QCheckBox::indicator:hover {{
     border-color: {ACCENT};
 }}
 QCheckBox:disabled {{
-    color: {TEXT_FAINT};
+    color: {TEXT_MUTED};
 }}
 QCheckBox::indicator:disabled {{
-    background-color: #1A1A20;
-    border-color: #26262E;
+    background-color: {SURFACE};
+    border-color: {BORDER};
 }}
 
 /* ---------- Slider ---------- */
 QSlider::groove:horizontal {{
     height: 4px;
-    background: {BORDER};
+    background: {TRACK};
     border-radius: 2px;
 }}
 QSlider::sub-page:horizontal {{
@@ -167,11 +361,15 @@ QSlider::sub-page:horizontal {{
     border-radius: 2px;
 }}
 QSlider::handle:horizontal {{
-    background: #FFFFFF;
+    background: {TEXT};
+    border: none;
     width: 14px;
     height: 14px;
     margin: -6px 0;
     border-radius: 7px;
+}}
+QSlider::handle:horizontal:hover {{
+    background: {ON_ACCENT};
 }}
 
 /* ---------- Tabs ---------- */
@@ -180,7 +378,7 @@ QTabWidget::pane {{
     background-color: {BG};
 }}
 QTabBar {{
-    background-color: {SURFACE};
+    background-color: transparent;
 }}
 QTabBar::tab {{
     background-color: transparent;
@@ -202,36 +400,41 @@ QTabBar::tab:selected {{
 QListView, QTableView, QTreeView {{
     background-color: {SURFACE};
     border: 1px solid {BORDER};
-    border-radius: 8px;
+    border-radius: {R_VIEW}px;
     outline: none;
     gridline-color: {BORDER};
-    selection-background-color: {ACCENT_DIM};
 }}
 QTableView::item {{
-    padding: 4px 6px;
+    padding: 5px 6px;
     border: none;
 }}
+QTableView::item:hover {{
+    background-color: {RAISED};
+}}
 QTableView::item:selected {{
-    background-color: {ACCENT_DIM};
-    color: #FFFFFF;
+    background-color: {ACCENT_SOFT};
+    color: {TEXT};
 }}
 QListView::item:selected {{
     background-color: transparent;
 }}
+QHeaderView {{
+    background-color: transparent;
+}}
 QHeaderView::section {{
-    background-color: {CARD};
-    color: {TEXT_DIM};
+    background-color: {SURFACE};
+    color: {TEXT_FAINT};
     border: none;
-    border-right: 1px solid {BORDER};
     border-bottom: 1px solid {BORDER};
-    padding: 7px 8px;
+    padding: 8px;
+    font-size: 11px;
     font-weight: 600;
 }}
 QHeaderView::section:hover {{
-    color: {TEXT};
+    color: {TEXT_DIM};
 }}
 QTableCornerButton::section {{
-    background-color: {CARD};
+    background-color: {SURFACE};
     border: none;
 }}
 
@@ -242,12 +445,12 @@ QScrollBar:vertical {{
     margin: 2px;
 }}
 QScrollBar::handle:vertical {{
-    background: #35353F;
+    background: {SCROLL};
     border-radius: 5px;
     min-height: 30px;
 }}
 QScrollBar::handle:vertical:hover {{
-    background: #45454F;
+    background: {SCROLL_HOVER};
 }}
 QScrollBar:horizontal {{
     background: transparent;
@@ -255,9 +458,12 @@ QScrollBar:horizontal {{
     margin: 2px;
 }}
 QScrollBar::handle:horizontal {{
-    background: #35353F;
+    background: {SCROLL};
     border-radius: 5px;
     min-width: 30px;
+}}
+QScrollBar::handle:horizontal:hover {{
+    background: {SCROLL_HOVER};
 }}
 QScrollBar::add-line, QScrollBar::sub-line {{
     height: 0; width: 0;
@@ -268,16 +474,16 @@ QScrollBar::add-page, QScrollBar::sub-page {{
 
 /* ---------- Misc ---------- */
 QProgressBar {{
-    background-color: {CARD};
+    background-color: {TRACK};
     border: none;
-    border-radius: 4px;
+    border-radius: {R_TINY}px;
     height: 6px;
     text-align: center;
     color: transparent;
 }}
 QProgressBar::chunk {{
     background-color: {ACCENT};
-    border-radius: 4px;
+    border-radius: {R_TINY}px;
 }}
 QStatusBar {{
     background-color: {SURFACE};
@@ -288,17 +494,18 @@ QStatusBar::item {{
     border: none;
 }}
 QSplitter::handle {{
-    background-color: {BORDER};
+    background-color: transparent;
 }}
 QSplitter::handle:horizontal {{
-    width: 1px;
+    width: 14px;
 }}
 QToolTip {{
-    background-color: {CARD};
+    background-color: {RAISED};
     color: {TEXT};
-    border: 1px solid {BORDER};
-    padding: 6px 8px;
-    border-radius: 4px;
+    border: 1px solid {BORDER_STRONG};
+    padding: 6px 9px;
+    border-radius: {R_CTRL}px;
+    font-size: 12px;
 }}
 QScrollArea {{
     border: none;
@@ -306,7 +513,7 @@ QScrollArea {{
 }}
 QGroupBox {{
     border: 1px solid {BORDER};
-    border-radius: 8px;
+    border-radius: {R_CARD}px;
     margin-top: 14px;
     padding-top: 12px;
     background-color: {SURFACE};
@@ -315,8 +522,15 @@ QGroupBox::title {{
     subcontrol-origin: margin;
     left: 12px;
     padding: 0 4px;
-    color: {TEXT_DIM};
+    color: {TEXT_FAINT};
+    font-size: 11px;
     font-weight: 600;
+}}
+QMessageBox {{
+    background-color: {SURFACE};
+}}
+QMessageBox QLabel {{
+    background-color: transparent;
 }}
 """
 
@@ -327,19 +541,19 @@ def apply_matplotlib_style() -> None:
 
     matplotlib.rcParams.update(
         {
-            "figure.facecolor": SURFACE,
-            "axes.facecolor": SURFACE,
-            "savefig.facecolor": SURFACE,
-            "axes.edgecolor": BORDER,
-            "axes.labelcolor": TEXT_DIM,
+            "figure.facecolor": CARD,
+            "axes.facecolor": CARD,
+            "savefig.facecolor": CARD,
+            "axes.edgecolor": BORDER_STRONG,
+            "axes.labelcolor": TEXT_FAINT,
             "axes.titlecolor": TEXT,
             "axes.titlesize": 10,
             "axes.titleweight": "600",
             "axes.labelsize": 9,
             "axes.grid": True,
             "grid.color": BORDER,
-            "grid.linewidth": 0.6,
-            "grid.alpha": 0.7,
+            "grid.linewidth": 0.8,
+            "grid.alpha": 1.0,
             "text.color": TEXT,
             "xtick.color": TEXT_FAINT,
             "ytick.color": TEXT_FAINT,

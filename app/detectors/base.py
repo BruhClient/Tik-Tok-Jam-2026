@@ -1,7 +1,9 @@
 """Detector plugin interface.
 
-This is the ONLY seam the real model needs to touch. To plug in a trained
-model, create app/detectors/my_model.py:
+This is the ONLY seam the real model needs to touch. Usually there is nothing
+to write at all: drop a checkpoint at models/model.pt and trained.py picks it
+up. Write a module here only when the model needs its own preprocessing or
+architecture code:
 
     from .base import Detector, register
 
@@ -46,8 +48,37 @@ class Detector(ABC):
     # Recommended images per predict_batch call; smaller = smoother progress.
     batch_size: int = 16
 
+    # Where "AI" starts. 0.5 only makes sense for a backend whose scores are
+    # centred there; a calibrated model usually carries its own operating point
+    # in the checkpoint, so load() may overwrite this on the instance. Nothing
+    # about the scores changes - this is the decision boundary, not the score.
+    default_threshold: float = 0.5
+
+    # A backend that loads a trained checkpoint sets these. `weights` is per
+    # instance so --weights can point at a file other than the default.
+    requires_weights: bool = False
+    default_weights: str = ""
+    weights: str | None = None
+
     def __init__(self):
         self._loaded = False
+
+    # -- readiness ---------------------------------------------------------
+    @classmethod
+    def resolve_weights(cls, weights: str = None) -> str:
+        return weights or cls.default_weights
+
+    @classmethod
+    def is_ready(cls, weights: str = None) -> bool:
+        """False when a required checkpoint is missing.
+
+        Lets the picker show the backend and say why it can't run yet, instead
+        of hiding it or failing deep inside load().
+        """
+        if not cls.requires_weights:
+            return True
+        path = cls.resolve_weights(weights)
+        return bool(path) and os.path.isfile(path)
 
     # -- lifecycle ---------------------------------------------------------
     def load(self) -> None:
@@ -114,12 +145,26 @@ def register(cls):
 
 
 def available_detectors() -> list:
-    """Registered detector classes, real backends listed before placeholders."""
-    return sorted(_REGISTRY.values(), key=lambda c: (c.is_placeholder, c.display_name))
+    """Registered detector classes, best-first.
+
+    A ready real backend outranks a placeholder, which outranks a backend whose
+    checkpoint is missing. So the trained slot sits at the bottom until weights
+    exist, then becomes the default everywhere with no flag to flip.
+    """
+    return sorted(_REGISTRY.values(),
+                  key=lambda c: (not c.is_ready(), c.is_placeholder, c.display_name))
 
 
-def get_detector(name: str) -> Detector:
+def weights_detectors() -> list:
+    """Backends that load a checkpoint - used to resolve a bare --weights."""
+    return [c for c in available_detectors() if c.requires_weights]
+
+
+def get_detector(name: str, weights: str = None) -> Detector:
     cls = _REGISTRY.get(name)
     if cls is None:
         raise KeyError(f"No detector registered under {name!r}")
-    return cls()
+    det = cls()
+    if weights:
+        det.weights = weights
+    return det

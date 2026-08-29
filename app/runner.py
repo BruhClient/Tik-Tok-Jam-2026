@@ -14,8 +14,8 @@ import sys
 import time
 from dataclasses import dataclass, field
 
-from .dataset import Dataset, ImageItem, apply_labels, scan_directory
-from .detectors import available_detectors, get_detector
+from .dataset import Dataset, ImageItem, LabelMode, apply_labels, scan_directory
+from .detectors import available_detectors, get_detector, weights_detectors
 
 
 # --------------------------------------------------------------------------- #
@@ -82,6 +82,7 @@ class RunResult:
     elapsed: float = 0.0
     failures: list = field(default_factory=list)    # (path, message)
     source: str = ""                                # directory or json file
+    threshold: float = 0.5                          # the detector's own operating point
 
     @property
     def n_scored(self) -> int:
@@ -102,21 +103,40 @@ class RunResult:
 # detector selection
 # --------------------------------------------------------------------------- #
 
-def default_detector_name() -> str:
-    """Prefer a real backend; available_detectors sorts those first."""
+def default_detector_name(weights: str = None) -> str:
+    """The best backend available right now.
+
+    available_detectors() already ranks a ready real model above the
+    placeholders, so this returns the trained model once its checkpoint exists
+    and a placeholder until then. A bare --weights picks the backend that takes
+    one, since that is unambiguously what was meant.
+    """
+    if weights:
+        takers = weights_detectors()
+        if takers:
+            return takers[0].name
     detectors = available_detectors()
     if not detectors:
         raise RuntimeError("no detectors registered")
     return detectors[0].name
 
 
-def load_detector(name: str = None):
-    name = name or default_detector_name()
+def load_detector(name: str = None, weights: str = None):
+    name = name or default_detector_name(weights)
     try:
-        detector = get_detector(name)
+        detector = get_detector(name, weights)
     except KeyError:
         names = ", ".join(c.name for c in available_detectors())
         raise SystemExit(f"error: unknown detector {name!r}. Available: {names}")
+
+    if not type(detector).is_ready(detector.weights):
+        expected = detector.resolve_weights(detector.weights)
+        raise SystemExit(
+            f"error: {detector.display_name} needs a checkpoint, and none is at "
+            f"{os.path.abspath(expected)}\n"
+            f"       put one there, pass --weights <file>, or pick another "
+            f"backend with --detector.")
+
     detector.ensure_loaded()
     return detector
 
@@ -125,13 +145,20 @@ def load_detector(name: str = None):
 # the run
 # --------------------------------------------------------------------------- #
 
-def scan(directory: str, total_steps: int = 4) -> Dataset:
+def scan(directory: str, total_steps: int = 4,
+         label_mode: LabelMode = LabelMode.AUTO) -> Dataset:
+    """Scan a folder. LabelMode.NONE deliberately ignores any labels present.
+
+    The GUI passes NONE when you said you were uploading plain images, so a
+    folder that happens to hold real/ and ai/ is still scored as unlabeled -
+    the screen you land on is the one you asked for.
+    """
     step(1, total_steps, f"scanning  {os.path.abspath(directory)}")
     if not os.path.isdir(directory):
         raise SystemExit(f"error: not a directory: {directory}")
 
     started = time.perf_counter()
-    ds = scan_directory(directory)
+    ds = scan_directory(directory, mode=label_mode)
     took = time.perf_counter() - started
 
     if not ds.items:
@@ -144,6 +171,8 @@ def scan(directory: str, total_steps: int = 4) -> Dataset:
         log(f"{ds.n_real:,} authentic   |   {ds.n_ai:,} AI"
             + (f"   |   {ds.n_unlabeled:,} unlabeled" if ds.n_unlabeled else ""), indent=6)
         log(f"labels from {ds.label_source_detail}", indent=6)
+    elif label_mode == LabelMode.NONE:
+        log("labels ignored - scoring as unlabeled", indent=6)
     else:
         log("no labels found - scores only, no accuracy metrics", indent=6)
     return ds
@@ -175,6 +204,7 @@ def score(ds: Dataset, detector, total_steps: int = 4) -> RunResult:
         is_placeholder=bool(getattr(detector, "is_placeholder", False)),
         scores=scores, elapsed=elapsed, failures=failures,
         source=ds.root,
+        threshold=float(getattr(detector, "default_threshold", 0.5)),
     )
     nan_count = len(scores) - result.n_scored
     log(f"scored {result.n_scored:,} images in {elapsed:.1f}s", indent=6)
@@ -185,19 +215,23 @@ def score(ds: Dataset, detector, total_steps: int = 4) -> RunResult:
     return result
 
 
-def prepare_detector(name: str = None, total_steps: int = 4):
+def prepare_detector(name: str = None, weights: str = None, total_steps: int = 4):
     step(2, total_steps, "loading detector")
-    detector = load_detector(name)
+    detector = load_detector(name, weights)
     log(detector.display_name, indent=6)
+    if detector.requires_weights:
+        log(f"weights {os.path.abspath(detector.resolve_weights(detector.weights))}",
+            indent=6)
     if detector.is_placeholder:
         warn("PLACEHOLDER backend - these scores are not real detections")
     return detector
 
 
-def run_directory(directory: str, detector_name: str = None, total_steps: int = 4):
+def run_directory(directory: str, detector_name: str = None, weights: str = None,
+                  total_steps: int = 4, label_mode: LabelMode = LabelMode.AUTO):
     """scan -> load detector -> score. Returns (Dataset, RunResult)."""
-    ds = scan(directory, total_steps)
-    detector = prepare_detector(detector_name, total_steps)
+    ds = scan(directory, total_steps, label_mode)
+    detector = prepare_detector(detector_name, weights, total_steps)
     result = score(ds, detector, total_steps)
     return ds, result
 
@@ -272,13 +306,13 @@ def summarize(ds: Dataset, result: RunResult, threshold: float = 0.5,
         flagged = sum(1 for s in result.scores
                       if not math.isnan(s) and s >= threshold)
         log(f"{flagged:,} of {result.n_scored:,} images flagged as AI "
-            f"at threshold {threshold:.2f}", indent=6)
+            f"at threshold {threshold:.3f}", indent=6)
         log("no ground-truth labels - accuracy cannot be measured", indent=6)
         return
 
     y, s = result.valid_pairs(ds)
     m = M.compute_metrics(y, s, threshold)
-    log(f"threshold {threshold:.2f}", indent=6)
+    log(f"threshold {threshold:.3f}", indent=6)
     log(f"accuracy  {M.fmt(m.accuracy)}      AUC {M.fmt(m.auc, pct=False)}      "
         f"F1 {M.fmt(m.f1, pct=False)}", indent=6)
     log(f"precision {M.fmt(m.precision)}      recall {M.fmt(m.recall)}      "

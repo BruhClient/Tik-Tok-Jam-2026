@@ -1,14 +1,15 @@
-"""ROBUSTNESS sweep: how far does accuracy fall under post-processing?
+"""ROBUSTNESS: how far does accuracy fall under post-processing?
 
     python robustness.py <image_dir>
-    python robustness.py <image_dir> --transforms jpeg,blur,rescale --sample 200
+    python robustness.py <image_dir> --transforms jpeg,blur,rescale --severities 1,3,5
 
-Each selected transform is applied in memory at five severities and the whole
-sample is re-scored, then compared against a clean baseline measured through
-the same pipeline. Writes robustness_report.json next to the dataset, which
-`python main.py` picks up and draws as the degradation curve.
+Each selected transform is applied in memory at the chosen severities and the
+sample is re-scored, always against a clean baseline measured through the same
+pipeline. Writes robustness_report.json next to the dataset; gui.py picks that
+up and draws it.
 
-Ground-truth labels are required - this measures accuracy, not just scores.
+Ground-truth labels are required - this measures accuracy, not just scores,
+so point it at a folder holding real/ and ai/.
 """
 
 from __future__ import annotations
@@ -16,35 +17,15 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from PIL import Image                                    # noqa: E402
-
-from app import metrics as M                             # noqa: E402
-from app import runner                                   # noqa: E402
-from app.export import export_robustness_json            # noqa: E402
+from app import metrics as M                              # noqa: E402
+from app import runner                                    # noqa: E402
+from app import sweep as SW                               # noqa: E402
 from app.transforms import TRANSFORMS, TRANSFORMS_BY_KEY  # noqa: E402
 
 DEFAULT_TRANSFORMS = "jpeg,blur,rescale,crop,social"
-DEFAULT_REPORT = "robustness_report.json"
-
-
-class _Bag:
-    """Minimal stand-in for the state object export.py expects."""
-
-    def __init__(self, threshold):
-        self.threshold = threshold
-        self.robustness = {}
-        self.robustness_baseline = None
-
-
-class _Cell:
-    def __init__(self, key, severity, metrics):
-        self.transform_key = key
-        self.severity = severity
-        self.metrics = metrics
 
 
 def parse_args(argv=None):
@@ -62,65 +43,25 @@ def parse_args(argv=None):
     ap.add_argument("--max-side", type=int, default=768,
                     help="decode cap in pixels (default: 768)")
     ap.add_argument("--detector", "-d", default=None, help="registered detector name")
-    ap.add_argument("--threshold", "-t", type=float, default=0.5)
+    ap.add_argument("--weights", "-w", default=None,
+                    help="checkpoint to load (default: models/model.pt)")
+    ap.add_argument("--threshold", "-t", type=float, default=None,
+                    help="decision threshold for the reported accuracy "
+                         "(default: the detector's own operating point, or 0.5)")
     ap.add_argument("--out", "-o", default=None,
-                    help=f"report path (default: <dir>/{DEFAULT_REPORT})")
+                    help=f"report path (default: <dir>/{SW.DEFAULT_REPORT})")
+    ap.add_argument("--quiet", "-q", action="store_true")
     ap.add_argument("--list-transforms", action="store_true")
     return ap.parse_args(argv)
 
 
-def build_sample(dataset, n: int):
-    """Balanced subset of the labeled images, deterministic."""
-    import random
-
-    labeled = [i for i, it in enumerate(dataset.items) if it.label is not None]
-    rng = random.Random(20260829)
-    reals = [i for i in labeled if dataset.items[i].label == 0]
-    ais = [i for i in labeled if dataset.items[i].label == 1]
-    rng.shuffle(reals)
-    rng.shuffle(ais)
-    half = max(1, min(n // 2, min(len(reals), len(ais)) or n))
-    picked = sorted(reals[:half] + ais[:half])
-    return ([dataset.items[i].path for i in picked],
-            [dataset.items[i].label for i in picked])
-
-
-def load_image(path: str, max_side: int):
-    img = Image.open(path)
-    try:
-        img.draft("RGB", (max_side, max_side))
-    except Exception:
-        pass
-    img = img.convert("RGB")
-    if max(img.size) > max_side:
-        s = max_side / max(img.size)
-        img = img.resize((max(1, int(img.width * s)), max(1, int(img.height * s))),
-                         Image.BILINEAR)
-    return img
-
-
-def score_cell(detector, paths, labels, spec, severity, max_side):
-    """Transform and re-score one (transform, severity) cell."""
-    bs = max(1, int(getattr(detector, "batch_size", 16)))
-    scores, kept = [], []
-    for start in range(0, len(paths), bs):
-        chunk = paths[start:start + bs]
-        images, chunk_labels = [], []
-        for j, p in enumerate(chunk):
-            try:
-                img = load_image(p, max_side)
-                img = spec.apply(img, severity) if severity else img
-                img._aigc_source = p            # hint the placeholder backend uses
-                img._aigc_severity = severity
-                images.append(img)
-                chunk_labels.append(labels[start + j])
-            except Exception as exc:
-                runner.warn(f"skipped {os.path.basename(p)}: {exc}")
-        if not images:
-            continue
-        scores.extend(float(s) for s in detector.predict_images(images))
-        kept.extend(chunk_labels)
-    return kept, scores
+def _report(exc: SystemExit) -> int:
+    """Print a SystemExit raised for bad input and turn it into exit code 2."""
+    code = exc.code
+    if isinstance(code, str):
+        print(code, file=sys.stderr)
+        return 2
+    return int(code or 0)
 
 
 def main(argv=None) -> int:
@@ -139,7 +80,11 @@ def main(argv=None) -> int:
               "(use --list-transforms to see the options)", file=sys.stderr)
         return 2
 
-    dataset = runner.scan(args.directory, total_steps=4)
+    runner.QUIET = args.quiet
+    try:
+        dataset = runner.scan(args.directory, total_steps=4)
+    except SystemExit as exc:
+        return _report(exc)
     if not dataset.has_labels:
         print("error: this sweep measures accuracy, so it needs ground-truth labels.\n"
               "       use real/ and ai/ subfolders, a labels.csv, or real_/ai_ prefixes.",
@@ -153,67 +98,47 @@ def main(argv=None) -> int:
               f"       available: {', '.join(t.key for t in TRANSFORMS)}", file=sys.stderr)
         return 2
     severities = [int(s) for s in args.severities.split(",") if s.strip()]
+    cells = [(k, sv) for k in keys for sv in severities]
 
-    detector = runner.prepare_detector(args.detector, total_steps=4)
-    paths, labels = build_sample(dataset, args.sample)
+    try:
+        detector = runner.prepare_detector(args.detector, args.weights, total_steps=4)
+    except SystemExit as exc:
+        return _report(exc)
+    runner.step(3, 4, f"sweeping {len(cells) + 1} cells x up to {args.sample} images")
 
-    cells = [("clean", 0)] + [(k, sv) for k in keys for sv in severities]
-    runner.step(3, 4, f"sweeping {len(cells)} cells x {len(paths)} images "
-                      f"({len(cells) * len(paths):,} scored images)")
+    try:
+        # A calibrated model carries the threshold it was tuned for; the
+        # whole point of this sweep is accuracy at a FIXED threshold, so it
+        # has to be the right one.
+        threshold = (args.threshold if args.threshold is not None
+                     else float(getattr(detector, "default_threshold", 0.5)))
+        result = SW.run_sweep(dataset, detector, cells, sample=args.sample,
+                              max_side=args.max_side, threshold=threshold)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
-    bag = _Bag(args.threshold)
-    started = time.perf_counter()
-
-    for i, (key, severity) in enumerate(cells, 1):
-        spec = TRANSFORMS_BY_KEY[key]
-        name = "clean baseline" if key == "clean" else \
-               f"{spec.display_name}  |  {spec.label_for(severity)}"
-        t0 = time.perf_counter()
-        kept, scores = score_cell(detector, paths, labels, spec, severity, args.max_side)
-        m = M.compute_metrics(kept, scores, args.threshold)
-
-        if key == "clean":
-            bag.robustness_baseline = m
-            delta = ""
-        else:
-            bag.robustness[(key, severity)] = _Cell(key, severity, m)
-            base = bag.robustness_baseline
-            d = m.accuracy - base.accuracy if base else float("nan")
-            delta = f"  d {'+' if d >= 0 else '-'}{abs(d) * 100:4.1f}pp" if d == d else ""
-
-        runner.log(f"  [{i:>2}/{len(cells)}] {name:<44} "
-                   f"acc {M.fmt(m.accuracy):>6}  auc {M.fmt(m.auc, pct=False):>5}"
-                   f"{delta}   ({time.perf_counter() - t0:.1f}s)")
-
-    elapsed = time.perf_counter() - started
-    out = args.out or os.path.join(dataset.root, DEFAULT_REPORT)
-
-    result = runner.RunResult(detector_name=detector.name,
-                              detector_display=detector.display_name,
-                              is_placeholder=detector.is_placeholder,
-                              scores=[], source=dataset.root)
-    export_robustness_json(out, dataset, result, bag)
+    out = args.out or os.path.join(dataset.root, SW.DEFAULT_REPORT)
+    written = result.write(out)
 
     runner.step(4, 4, "results")
-    base = bag.robustness_baseline
+    base = result.baseline
     runner.log(f"clean baseline   accuracy {M.fmt(base.accuracy)}  "
                f"AUC {M.fmt(base.auc, pct=False)}", indent=6)
 
-    drops = sorted(((c.metrics.accuracy - base.accuracy, k, sv)
-                    for (k, sv), c in bag.robustness.items()
-                    if c.metrics.accuracy == c.metrics.accuracy))
-    if drops:
-        worst_d, worst_k, worst_sv = drops[0]
-        spec = TRANSFORMS_BY_KEY[worst_k]
-        runner.log(f"worst case       {spec.display_name}  |  {spec.label_for(worst_sv)}"
-                   f"   {worst_d * 100:+.1f}pp", indent=6)
-        mean = sum(d for d, _, _ in drops) / len(drops)
-        runner.log(f"mean drop        {mean * 100:+.1f}pp over {len(drops)} cells", indent=6)
-    runner.log(f"swept in {elapsed:.1f}s", indent=6)
-    runner.log(f"report -> {os.path.abspath(out)}", indent=6)
+    worst = result.worst()
+    if worst:
+        worst_d, key, sv, m = worst
+        spec = TRANSFORMS_BY_KEY[key]
+        runner.log(f"worst case       {spec.display_name} | {spec.label_for(sv)}"
+                   f"   {worst_d * 100:+.1f}pp  (acc {M.fmt(m.accuracy)})", indent=6)
+        runner.log(f"mean drop        {result.mean_drop() * 100:+.1f}pp "
+                   f"over {len(result.cells)} cells", indent=6)
+    runner.log(f"swept {result.n_images} images per cell in {result.elapsed:.1f}s",
+               indent=6)
+    runner.log(f"report -> {written}", indent=6)
     runner.log("")
-    runner.log("visualise it:  python main.py"
-               + ("" if os.path.dirname(out) == dataset.root else f"  {dataset.root}"))
+    runner.log(f"see it:  python gui.py {args.directory}")
     return 0
 
 

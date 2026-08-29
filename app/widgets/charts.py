@@ -29,8 +29,8 @@ class MplCanvas(FigureCanvasQTAgg):
         self.ax = self.figure.add_subplot(111)
         for spine in ("top", "right"):
             self.ax.spines[spine].set_visible(False)
-        self.ax.spines["left"].set_color(T.BORDER)
-        self.ax.spines["bottom"].set_color(T.BORDER)
+        self.ax.spines["left"].set_color(T.BORDER_STRONG)
+        self.ax.spines["bottom"].set_color(T.BORDER_STRONG)
 
     def _finish(self):
         self.draw_idle()
@@ -52,26 +52,26 @@ class MplCanvas(FigureCanvasQTAgg):
         drew = False
         if s.size and y.size:
             if np.any(y == 0):
-                self.ax.hist(s[y == 0], bins=bins, color=T.REAL_COLOR, alpha=0.72,
+                self.ax.hist(s[y == 0], bins=bins, color=T.REAL_COLOR, alpha=0.82,
                              label="Authentic", edgecolor="none")
                 drew = True
             if np.any(y == 1):
-                self.ax.hist(s[y == 1], bins=bins, color=T.AI_COLOR, alpha=0.72,
+                self.ax.hist(s[y == 1], bins=bins, color=T.AI_COLOR, alpha=0.82,
                              label="AI-generated", edgecolor="none")
                 drew = True
         if unlabeled_scores is not None and len(unlabeled_scores):
             self.ax.hist(np.asarray(unlabeled_scores, dtype=float), bins=bins,
-                         color=T.TEXT_FAINT, alpha=0.55, label="Unlabeled",
+                         color=T.TEXT_FAINT, alpha=0.65, label="Unlabeled",
                          edgecolor="none")
             drew = True
 
         if not drew:
             return self.clear_to_message("Run a detector to see the score distribution")
 
-        self.ax.axvline(threshold, color=T.TEXT, linestyle="--", linewidth=1.1,
-                        label=f"threshold {threshold:.2f}")
+        self.ax.axvline(threshold, color=T.TEXT_DIM, linestyle="--", linewidth=1.1,
+                        label=f"threshold {threshold:.3f}")
         self.ax.set_title("Score distribution")
-        self.ax.set_xlabel("P(AI-generated)")
+        self.ax.set_xlabel("P(AI)")
         self.ax.set_ylabel("images")
         self.ax.legend(loc="upper center", ncol=2)
         self._finish()
@@ -82,10 +82,11 @@ class MplCanvas(FigureCanvasQTAgg):
         if fpr is None:
             return self.clear_to_message("ROC needs both classes labeled")
         auc = M.roc_auc(y_true, scores)
-        self.ax.plot([0, 1], [0, 1], color=T.BORDER, linestyle="--", linewidth=1)
+        self.ax.plot([0, 1], [0, 1], color=T.BORDER_STRONG, linestyle="--",
+                     linewidth=1)
         self.ax.plot(fpr, tpr, color=T.ACCENT, linewidth=2)
-        self.ax.fill_between(fpr, tpr, color=T.ACCENT, alpha=0.12)
-        self.ax.set_title(f"ROC · AUC = {auc:.4f}")
+        self.ax.fill_between(fpr, tpr, color=T.ACCENT, alpha=0.07)
+        self.ax.set_title(f"ROC · AUC {auc:.3f}")
         self.ax.set_xlabel("false positive rate")
         self.ax.set_ylabel("true positive rate")
         self.ax.set_xlim(0, 1)
@@ -100,7 +101,7 @@ class MplCanvas(FigureCanvasQTAgg):
         ap = M.average_precision(y_true, scores)
         self.ax.plot(rec, prec, color=T.SECONDARY, linewidth=2)
         self.ax.fill_between(rec, prec, color=T.SECONDARY, alpha=0.10)
-        self.ax.set_title(f"Precision–Recall · AP = {ap:.4f}")
+        self.ax.set_title(f"Precision–Recall · AP {ap:.3f}")
         self.ax.set_xlabel("recall")
         self.ax.set_ylabel("precision")
         self.ax.set_xlim(0, 1)
@@ -112,18 +113,28 @@ class MplCanvas(FigureCanvasQTAgg):
         if not m.valid:
             return self.clear_to_message("Confusion matrix needs labels")
         mat = np.array([[m.tn, m.fp], [m.fn, m.tp]], dtype=float)
-        norm = mat / max(mat.sum(), 1)
-        self.ax.imshow(norm, cmap="magma", vmin=0, vmax=max(norm.max(), 1e-6))
+        norm = mat / max(mat.max(), 1)
+
+        # theme colours instead of a loud colormap: green = correct, red = error,
+        # opacity carries the count so the diagonal reads at a glance
+        rgba = np.zeros((2, 2, 4))
+        for i in range(2):
+            for j in range(2):
+                hex_color = T.GOOD if i == j else T.BAD
+                r, g, b = (int(hex_color[k:k + 2], 16) / 255 for k in (1, 3, 5))
+                rgba[i, j] = (r, g, b, 0.08 + 0.30 * norm[i, j])
+        self.ax.imshow(rgba, aspect="auto")     # fill the panel, don't float in it
+
         labels = [["TN", "FP"], ["FN", "TP"]]
         for i in range(2):
             for j in range(2):
-                shade = "#FFFFFF" if norm[i, j] < 0.55 else "#101014"
-                self.ax.text(j, i, f"{labels[i][j]}\n{int(mat[i, j])}",
-                             ha="center", va="center", color=shade,
-                             fontsize=11, fontweight="700")
+                self.ax.text(j, i - 0.13, labels[i][j], ha="center", va="center",
+                             color=T.TEXT_FAINT, fontsize=9, fontweight="700")
+                self.ax.text(j, i + 0.13, f"{int(mat[i, j])}", ha="center", va="center",
+                             color=T.TEXT, fontsize=16, fontweight="700")
         self.ax.set_xticks([0, 1], ["pred: real", "pred: AI"])
         self.ax.set_yticks([0, 1], ["true: real", "true: AI"])
-        self.ax.set_title(f"Confusion @ {m.threshold:.2f}")
+        self.ax.set_title("Confusion matrix")
         self.ax.grid(False)
         self._finish()
 
@@ -136,7 +147,7 @@ class MplCanvas(FigureCanvasQTAgg):
         self.ax.plot(ts, acc, color=T.ACCENT, linewidth=1.8, label="accuracy")
         self.ax.plot(ts, f1, color=T.SECONDARY, linewidth=1.6, label="F1")
         self.ax.plot(ts, fpr, color=T.WARN, linewidth=1.4, label="FPR")
-        self.ax.axvline(threshold, color=T.TEXT, linestyle="--", linewidth=1.0)
+        self.ax.axvline(threshold, color=T.TEXT_DIM, linestyle="--", linewidth=1.0)
         self.ax.set_title("Metrics vs threshold")
         self.ax.set_xlabel("threshold")
         self.ax.set_xlim(0, 1)
@@ -151,18 +162,20 @@ class MplCanvas(FigureCanvasQTAgg):
         if not series:
             return self.clear_to_message("Run a robustness sweep to see degradation")
 
-        colors = [T.ACCENT, T.SECONDARY, T.WARN, T.GOOD, "#B48CFF",
-                  "#FF9F5A", "#5AB0FF", "#FF7BC0", "#9AE86B", "#C0C0CF"]
+        # a categorical set for a dark ground: every hue is light enough to
+        # hold as a 1.8px line, where the deeper tones tuned for white vanished
+        colors = [T.ACCENT, T.SECONDARY, T.WARN, T.GOOD, "#A78BFA",
+                  "#FB923C", "#60A5FA", "#F472B6", "#A3E635", "#94A3B8"]
         if baseline == baseline:
             self.ax.axhline(baseline, color=T.TEXT_DIM, linestyle="--", linewidth=1.2,
-                            label=f"clean baseline ({baseline:.3f})")
+                            label="clean baseline")
         for i, (name, points) in enumerate(sorted(series.items())):
             xs = sorted(points.keys())
             ys = [points[x] for x in xs]
             self.ax.plot(xs, ys, marker="o", markersize=4, linewidth=1.8,
                          color=colors[i % len(colors)], label=name)
-        self.ax.set_title(f"{metric_name} vs transform severity")
-        self.ax.set_xlabel("severity (1 = mild · 5 = harsh)")
+        self.ax.set_title("Robustness")
+        self.ax.set_xlabel("severity")
         self.ax.set_ylabel(metric_name.lower())
         self.ax.set_xticks([1, 2, 3, 4, 5])
         self.ax.set_ylim(0, 1.02)
