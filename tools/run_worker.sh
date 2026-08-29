@@ -8,8 +8,10 @@
 #
 # Laptop roster:  brennen=0  travis=1  dylan=2  joe=3
 #
-# Rough total corpus size  ~=  11 sources  x  CAP  x  NUM_WORKERS
-#   e.g. CAP=1500 on 4 laptops ~= 66k    CAP=4500 on 4 laptops ~= 200k
+# Rough total corpus size  ~=  15 class-slots  x  CAP  x  NUM_WORKERS
+#   e.g. CAP=1500 on 4 laptops ~= 90k    CAP=4500 on 4 laptops ~= 270k
+# (streamable ceiling of this mix is ~350-400k balanced; full GenImage 2.7M is
+#  a 678GB split-zip that won't fit/shard, so it's intentionally not here.)
 #
 # Every laptop runs the SAME command but with its own name. Each pulls a
 # disjoint set of shards, so the downloads run in parallel with zero overlap.
@@ -44,6 +46,12 @@ echo ">>> $WHO = worker $WID of $N  (cap=$CAP)  starting diverse pull"
 
 # ---- REAL + the 8 GenImage generators (mixed repo, label-based) ----
 run tinygenimage TheKernel01/Tiny-GenImage --splits train validation --real-labels 0 --ai-labels 1
+
+# ---- SID_Set: OpenImages reals + modern synthetic (0=real, 1=synthetic; 2=tampered skipped) ----
+run sidset saberzl/SID_Set --splits train validation --real-labels 0 --ai-labels 1
+
+# ---- CIFAKE warm-up, 32x32 (labels REVERSED: 0=FAKE, 1=REAL) ----
+run cifake dragonintelligence/CIFAKE-image-dataset --splits train test --real-labels 1 --ai-labels 0
 
 # ---- REAL sources (single-class repos) ----
 run bmreal  bitmind/bm-real    --splits train --all-real
