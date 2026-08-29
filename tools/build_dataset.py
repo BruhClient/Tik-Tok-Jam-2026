@@ -328,6 +328,8 @@ def split(args: argparse.Namespace) -> int:
     for label in ("real", "ai"):
         files = sorted(p for p in (POOL / label).glob("*") if p.suffix.lower() in IMG_EXTS)
         rng.shuffle(files)
+        if args.limit_per_class:
+            files = files[:args.limit_per_class]  # exact size, balanced across classes
         cut = int(len(files) * args.ratio)
         for name, group in (("train", files[:cut]), ("test", files[cut:])):
             dest = DATA / name / label
@@ -439,7 +441,8 @@ def main() -> int:
     mg.set_defaults(func=merge)
 
     sp = sub.add_parser("split", help="write train/test from the _pool")
-    sp.add_argument("--ratio", type=float, default=0.8)
+    sp.add_argument("--ratio", type=float, default=0.8, help="train fraction (0.5 = even train/test)")
+    sp.add_argument("--limit-per-class", type=int, default=0, help="cap images per class (0 = use all)")
     sp.add_argument("--seed", type=int, default=0)
     sp.set_defaults(func=split)
 
