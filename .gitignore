@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+sample_data*/
+predictions.json
+*_report.json
