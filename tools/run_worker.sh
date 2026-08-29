@@ -8,10 +8,16 @@
 #
 # Laptop roster:  brennen=0  travis=1  dylan=2  joe=3
 #
-# Rough total corpus size  ~=  15 class-slots  x  CAP  x  NUM_WORKERS
-#   e.g. CAP=1500 on 4 laptops ~= 90k    CAP=4500 on 4 laptops ~= 270k
-# (streamable ceiling of this mix is ~350-400k balanced; full GenImage 2.7M is
-#  a 678GB split-zip that won't fit/shard, so it's intentionally not here.)
+# CAP is the per-source ceiling on THIS laptop. Small curated sources self-limit
+# (they give whatever they have, up to CAP); the two BULK sources dominate scale:
+#   ELSA1M (AI, 1M embedded)  and  OpenImages (real, downloaded from URLs).
+# So total across NUM_WORKERS laptops ~= (small sources' totals) + CAP*NUM_WORKERS*2.
+#
+#   CAP=15000  on 4 laptops  ~=  ~500-700k balanced   (~45-60 min)
+#   CAP=60000  on 4 laptops  ~=  ~1.2M balanced        (~1.5h)
+#   CAP=250000 on 4 laptops  ~=  ~2M balanced          (~2-4h, download-bound)
+#
+# OpenImages reals are URL downloads: expect ~20-30% to 404/timeout (handled).
 #
 # Every laptop runs the SAME command but with its own name. Each pulls a
 # disjoint set of shards, so the downloads run in parallel with zero overlap.
@@ -42,6 +48,12 @@ run() {
     --stream --jobs 0 --num-workers "$N" --worker-id "$WID" "${CAPARG[@]}"
 }
 
+# reals that ship as URL lists -> download them (I/O-bound, uses threads)
+runurl() {
+  python tools/build_dataset.py ingest-urls "$@" \
+    --jobs 32 --num-workers "$N" --worker-id "$WID" "${CAPARG[@]}"
+}
+
 echo ">>> $WHO = worker $WID of $N  (cap=$CAP)  starting diverse pull"
 
 # ---- REAL + the 8 GenImage generators (mixed repo, label-based) ----
@@ -65,6 +77,12 @@ run realvis   bitmind/realvis-xl              --splits train --all-ai
 run mobius    bitmind/bm-mobius               --splits train --all-ai
 run fluxceleb bitmind/celeb-a-hq___FLUX.1-dev --splits train --all-ai
 run fluxffhq  bitmind/ffhq-256___FLUX.1-dev   --splits train --all-ai
+
+# ---- AI bulk: ELSA1M, 1M images across multiple diffusion models (embedded) ----
+run elsa1m    elsaEU/ELSA1M_track1            --splits train --all-ai
+
+# ---- REAL bulk: OpenImages V7 (URL list -> downloaded) to balance the AI bulk ----
+runurl openimages bitmind/open-images-v7 --label real --splits train
 
 echo ">>> worker $WID done. Pool is at data/_pool. Send it to the main laptop:"
 echo "    rsync -a data/_pool/  <main-laptop>:~/Tik-Tok-Jam-2026/data/_pool/"

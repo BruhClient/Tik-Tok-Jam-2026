@@ -254,6 +254,70 @@ def ingest_hf(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# URL-list ingest (big real datasets ship URLs, not embedded bytes)
+# --------------------------------------------------------------------------- #
+def ingest_urls(args: argparse.Namespace) -> int:
+    import concurrent.futures as cf
+
+    import requests
+    from datasets import load_dataset
+
+    label = "real" if args.label == "real" else "ai"
+    dest = DATA / args.dest / label
+    dest.mkdir(parents=True, exist_ok=True)
+    cap = args.limit_per_class
+    threads = args.jobs if args.jobs and args.jobs > 0 else 16
+    session = requests.Session()
+    session.headers["User-Agent"] = "Mozilla/5.0 (dataset-pool)"
+
+    def fetch(url: str) -> str:
+        try:
+            r = session.get(url, timeout=10)
+            r.raise_for_status()
+            im = Image.open(io.BytesIO(r.content)).convert("RGB")
+            h = hashlib.sha256(im.tobytes()).hexdigest()
+            path = dest / f"{args.source}_{h[:12]}.jpg"
+            if path.exists():
+                return "dup"
+            im.save(path, "JPEG", quality=args.jpeg_quality)
+            return "ok"
+        except Exception:
+            return "bad"
+
+    def urls():
+        """Stream url column; keep only this worker's rows (round-robin by index)."""
+        idx = 0
+        for split in args.splits:
+            ds = load_dataset(args.repo, split=split, streaming=True)
+            for row in ds:
+                take = args.num_workers <= 1 or idx % args.num_workers == args.worker_id
+                idx += 1
+                if take and row.get(args.url_col):
+                    yield row[args.url_col]
+
+    added = dup = bad = 0
+    with cf.ThreadPoolExecutor(max_workers=threads) as ex:
+        pending: set = set()
+        src = urls()
+        for u in src:
+            pending.add(ex.submit(fetch, u))
+            if len(pending) >= threads * 4:
+                done, pending = cf.wait(pending, return_when=cf.FIRST_COMPLETED)
+                for f in done:
+                    r = f.result()
+                    added += r == "ok"; dup += r == "dup"; bad += r == "bad"
+                if cap and added >= cap:
+                    break
+        for f in pending:
+            r = f.result()
+            added += r == "ok"; dup += r == "dup"; bad += r == "bad"
+
+    print(f"[{args.source} -> {args.dest}] {label}={added} "
+          f"(threads={threads}, {dup} dup, {bad} failed/404)")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # split + stats
 # --------------------------------------------------------------------------- #
 def split(args: argparse.Namespace) -> int:
@@ -357,6 +421,18 @@ def main() -> int:
     hf.add_argument("--worker-id", type=int, default=0, help="this laptop's index, 0..N-1")
     hf.add_argument("--jobs", type=int, default=0, help="re-encode processes (0 = all CPU cores)")
     hf.set_defaults(func=ingest_hf)
+
+    ur = sub.add_parser("ingest-urls", parents=[common], help="download a single-class URL-list dataset")
+    ur.add_argument("source")
+    ur.add_argument("repo")
+    ur.add_argument("--label", choices=["real", "ai"], required=True)
+    ur.add_argument("--splits", nargs="+", default=["train"])
+    ur.add_argument("--url-col", default="url")
+    ur.add_argument("--limit-per-class", type=int, default=0)
+    ur.add_argument("--num-workers", type=int, default=1)
+    ur.add_argument("--worker-id", type=int, default=0)
+    ur.add_argument("--jobs", type=int, default=16, help="concurrent download threads")
+    ur.set_defaults(func=ingest_urls)
 
     mg = sub.add_parser("merge", parents=[common], help="fold another machine's pool export in")
     mg.add_argument("src", help="path to the other machine's pool dir (contains real/ and ai/)")
