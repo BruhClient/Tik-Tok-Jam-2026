@@ -16,13 +16,24 @@ metrics, charts, exports — is real and final.
 ```bash
 pip install -r requirements.txt
 
-python main.py                       # then Load directory / Ctrl+O / drag-drop
-python main.py sample_data           # or open a directory straight away
-python main.py "C:\path\to\images"
+python main.py                          # dev: opens sample_data/test automatically
+python main.py "C:\path\to\images"      # or any other directory
 ```
 
-Drop your own images into `sample_data/real/` and `sample_data/ai/` to have a
-fixture that loads with one command, or point the app at any directory.
+**Dev target.** With no argument the console opens `sample_data/test/`,
+resolved relative to `main.py` (not the shell's working directory):
+
+```
+sample_data/
+├── test/          <- what `python main.py` opens
+│   ├── real/      authentic images   -> label 0
+│   └── ai/        AI-generated       -> label 1
+└── train/         ignored here; training data is not evaluation data
+```
+
+Change `DEV_DATA_DIR` at the top of `main.py` to target a different split.
+If the folder is missing the app still starts, prints the expected layout, and
+waits for you to load something.
 
 ## Screens
 
