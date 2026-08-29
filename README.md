@@ -64,12 +64,18 @@ instead of showing fake zeros.
 labels, a run report (metrics + timings + detector identity), and a robustness
 report (per transform × severity, with deltas against the clean baseline).
 
-The same output is available headlessly:
+`predict.py` is the production path — same output, no GUI, any directory:
 
 ```bash
-python tools/predict_dir.py <image_dir> --out predictions.json --detector heuristic
-python tools/predict_dir.py --list-detectors
+python predict.py <image_dir>                          # -> predictions.json
+python predict.py <image_dir> --out results.json --detector heuristic
+python predict.py <image_dir> --report run_report.json --threshold 0.4
+python predict.py --list-detectors
 ```
+
+It scans recursively, skips non-images, survives undecodable files, and needs no
+labels or folder structure. If the directory *does* carry labels it also prints
+an accuracy / AUC / F1 / FPR summary; otherwise that section is skipped.
 
 ## Plugging in the real model
 
@@ -115,7 +121,8 @@ Results and Robustness tabs.
 ## Layout
 
 ```
-main.py                    entry point
+main.py                    interactive console (GUI)
+predict.py                 production CLI: any directory -> predictions.json
 app/
   theme.py                 dark palette, Qt stylesheet, matplotlib rcParams
   state.py                 AppState + RunResult, all signals
@@ -126,6 +133,4 @@ app/
   workers.py               thumbnail pool, inference thread, sweep thread
   detectors/               plugin interface + placeholder backends
   widgets/                 main window, three tabs, grid, charts, components
-tools/
-  predict_dir.py           headless directory -> predictions.json
 ```
