@@ -2,18 +2,19 @@
 
     python tools/make_dummy_dataset.py --out sample_data --n 400
 
-"Authentic" images are noisy, textured and saved as JPEG (like camera output).
-"AI" images are smooth gradients and soft blobs saved as PNG. The split is
-crude on purpose - it just needs to produce non-degenerate score distributions.
+Produces one folder in the layout the app expects:
 
-Also writes a flat variant with labels.csv and a filename-prefix variant so the
-three label-detection modes can be tested.
+    sample_data/
+    ├── real/   noisy, textured, JPEG-encoded  (label 0)
+    └── ai/     smooth gradients, PNG          (label 1)
+
+The split is crude on purpose - it just needs to produce non-degenerate score
+distributions so the tables and charts have something real to show.
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import os
 import random
 
@@ -46,61 +47,35 @@ def _ai(rng: np.random.Generator, size: int) -> Image.Image:
         for c in range(3):
             img[:, :, c] += blob * rng.uniform(-0.3, 0.35)
     arr = np.clip(img * 255, 0, 255).astype(np.uint8)
-    out = Image.fromarray(arr).filter(ImageFilter.GaussianBlur(0.6))
-    return out
+    return Image.fromarray(arr).filter(ImageFilter.GaussianBlur(0.6))
 
 
 def build(out_dir: str, n: int, size: int, seed: int = 7):
     rng = np.random.default_rng(seed)
     py_rng = random.Random(seed)
 
-    dirs = {
-        "sub_real": os.path.join(out_dir, "real"),
-        "sub_ai": os.path.join(out_dir, "ai"),
-        "flat": os.path.join(out_dir + "_manifest", "images"),
-        "prefix": out_dir + "_prefix",
-    }
-    for d in dirs.values():
-        os.makedirs(d, exist_ok=True)
+    real_dir = os.path.join(out_dir, "real")
+    ai_dir = os.path.join(out_dir, "ai")
+    os.makedirs(real_dir, exist_ok=True)
+    os.makedirs(ai_dir, exist_ok=True)
 
-    manifest_rows = []
     half = n // 2
-
     for i in range(n):
         is_ai = i >= half
         img = _ai(rng, size) if is_ai else _authentic(rng, size)
         stem = f"{'ai' if is_ai else 'real'}_{i:04d}"
-
-        # 1) subfolder layout
-        sub_dir = dirs["sub_ai"] if is_ai else dirs["sub_real"]
         if is_ai:
-            img.save(os.path.join(sub_dir, stem + ".png"))
+            img.save(os.path.join(ai_dir, stem + ".png"))
         else:
-            img.save(os.path.join(sub_dir, stem + ".jpg"), quality=py_rng.randint(82, 96))
+            img.save(os.path.join(real_dir, stem + ".jpg"), quality=py_rng.randint(82, 96))
 
-        # 2) flat + manifest layout (every 2nd image, to keep it small)
-        if i % 2 == 0:
-            fname = f"img_{i:04d}." + ("png" if is_ai else "jpg")
-            img.save(os.path.join(dirs["flat"], fname))
-            manifest_rows.append({"image_path": f"images/{fname}", "label": int(is_ai)})
-
-        # 3) filename-prefix layout (every 3rd image)
-        if i % 3 == 0:
-            img.save(os.path.join(dirs["prefix"], stem + (".png" if is_ai else ".jpg")))
-
-    manifest_path = os.path.join(out_dir + "_manifest", "labels.csv")
-    with open(manifest_path, "w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["image_path", "label"])
-        w.writeheader()
-        w.writerows(manifest_rows)
-
-    print(f"subfolder set : {out_dir}  ({n} images)")
-    print(f"manifest set  : {out_dir}_manifest  ({len(manifest_rows)} images + labels.csv)")
-    print(f"prefix set    : {out_dir}_prefix")
+    print(f"wrote {half} authentic images to {real_dir}")
+    print(f"wrote {n - half} AI images to {ai_dir}")
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="sample_data", help="output directory")
     ap.add_argument("--n", type=int, default=400, help="number of images (half real, half AI)")
     ap.add_argument("--size", type=int, default=256, help="image side in pixels")
