@@ -4,3 +4,5 @@ sample_data/
 data/
 predictions.json
 *_report.json
+*.zip
+.DS_Store
