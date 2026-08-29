@@ -1,90 +1,120 @@
-"""AIGC Image Detector - desktop evaluation console (DEV entry point).
+"""DEV viewer: score a directory, then show the result.
 
-    python main.py                    open the dev dataset below
-    python main.py <image_directory>  open some other directory instead
+    python main.py                      score the dev dataset, open the viewer
+    python main.py <image_directory>    score any other directory
+    python main.py predictions.json     just visualise a finished result file
 
-Dev dataset: `sample_data/test/`, resolved relative to this file:
+All the work - scanning, loading the detector, scoring - runs first and logs to
+this terminal. The window opens on the finished result; nothing loads inside it.
+
+Dev dataset: `sample_data/`, resolved relative to this file. Both splits load
+as one pooled set:
 
     sample_data/
-    |-- test/            <- what this console opens
-    |   |-- real/        authentic images -> label 0
-    |   `-- ai/          AI-generated     -> label 1
-    `-- train/           ignored here; training data is not evaluation data
+    |-- train/
+    |   |-- real/     authentic images -> label 0
+    |   `-- ai/       AI-generated     -> label 1
+    `-- test/
+        |-- real/
+        `-- ai/
 
-Filenames do not matter and both label folders may nest further. Change
-DEV_DATA_DIR to target a different split. Production batch runs go through
-predict.py, which takes any directory and needs no structure at all.
+Production batch runs go through predict.py, which takes any directory, needs
+no structure, and never opens a window.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
-from PyQt6.QtWidgets import QApplication
+#: dataset opened when no argument is given
+DEV_DATA_DIR = "sample_data"
 
-from app import theme
-from app.widgets.main_window import MainWindow
+#: default decision threshold for the summary and the viewer
+DEFAULT_THRESHOLD = 0.5
 
-#: default dataset opened when no directory argument is given (the eval split -
-#: never point this at train/, or the accuracy numbers are measured on data the
-#: model was fitted to)
-DEV_DATA_DIR = os.path.join("sample_data", "test")
-
-#: label subfolders the dev dataset is expected to contain
-DEV_LABEL_DIRS = ("real", "ai")
+#: picked up automatically if it sits next to the dataset (see robustness.py)
+ROBUSTNESS_REPORT = "robustness_report.json"
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, PROJECT_ROOT)
+
+from app import runner                                    # noqa: E402
+from app.transforms import TRANSFORMS_BY_KEY              # noqa: E402
 
 
 def dev_dataset_dir() -> str:
-    """Absolute path of the dev dataset, resolved from this file, not the cwd."""
+    """Absolute dev dataset path, resolved from this file, not the cwd."""
     return os.path.join(PROJECT_ROOT, DEV_DATA_DIR)
 
 
-def check_dev_dataset(path: str) -> str | None:
-    """Return the path if usable, else print what is wrong and return None."""
-    if not os.path.isdir(path):
-        print(f"dev dataset not found: {path}", file=sys.stderr)
-        _print_expected_layout()
-        return None
+def load_robustness(report_path: str) -> dict:
+    """Reshape a robustness report into what the viewer's chart wants."""
+    if not os.path.isfile(report_path):
+        return {}
+    try:
+        with open(report_path, "r", encoding="utf-8") as f:
+            report = json.load(f)
+    except Exception as exc:
+        runner.warn(f"could not read {report_path}: {exc}")
+        return {}
 
-    missing = [d for d in DEV_LABEL_DIRS if not os.path.isdir(os.path.join(path, d))]
-    if missing:
-        print(f"dev dataset at {path} is missing: "
-              + ", ".join(d + "/" for d in missing), file=sys.stderr)
-        _print_expected_layout()
-        # still open it - the app will just report the images as unlabeled
-    return path
+    series = {}
+    for cell in report.get("cells", []):
+        spec = TRANSFORMS_BY_KEY.get(cell.get("transform"))
+        name = spec.display_name if spec else cell.get("transform", "?")
+        acc = (cell.get("metrics") or {}).get("accuracy")
+        if acc is not None and acc == acc:
+            series.setdefault(name, {})[cell.get("severity", 0)] = acc
 
-
-def _print_expected_layout() -> None:
-    # ASCII only: this goes to a Windows console that may not be UTF-8
-    print(f"expected layout:\n"
-          f"  {DEV_DATA_DIR}/\n"
-          f"    real/   authentic images\n"
-          f"    ai/     AI-generated images\n"
-          f"open any other folder with:  python main.py <directory>",
-          file=sys.stderr)
+    baseline = ((report.get("baseline") or {}).get("accuracy", float("nan")))
+    runner.log(f"      robustness report: {len(series)} transform(s) "
+               f"from {os.path.basename(report_path)}")
+    return {"series": series, "baseline": baseline, "metric": "Accuracy"}
 
 
 def main() -> int:
-    QApplication.setApplicationName("AIGC Image Detector")
-    QApplication.setOrganizationName("Hackathon")
+    arg = sys.argv[1] if len(sys.argv) > 1 else None
 
-    app = QApplication(sys.argv)
+    # ---- work first, with terminal logs ---------------------------------
+    if arg and arg.lower().endswith(".json"):
+        if not os.path.isfile(arg):
+            print(f"error: no such file: {arg}", file=sys.stderr)
+            return 2
+        dataset, result = runner.load_predictions(arg, total_steps=2)
+        runner.summarize(dataset, result, DEFAULT_THRESHOLD, total_steps=2, step_no=2)
+        report_dir = os.path.dirname(os.path.abspath(arg))
+    else:
+        directory = arg or dev_dataset_dir()
+        if not os.path.isdir(directory):
+            print(f"error: not a directory: {directory}", file=sys.stderr)
+            if arg is None:
+                print(f"the dev dataset is missing. Expected:\n"
+                      f"  {DEV_DATA_DIR}/train/real, {DEV_DATA_DIR}/train/ai\n"
+                      f"  {DEV_DATA_DIR}/test/real,  {DEV_DATA_DIR}/test/ai\n"
+                      f"or run:  python main.py <directory>", file=sys.stderr)
+            return 2
+        dataset, result = runner.run_directory(directory)
+        runner.summarize(dataset, result, DEFAULT_THRESHOLD)
+        report_dir = dataset.root
+
+    robustness = load_robustness(os.path.join(report_dir, ROBUSTNESS_REPORT))
+
+    # ---- then draw it ----------------------------------------------------
+    runner.log("")
+    runner.log("opening viewer...")
+
+    from PyQt6.QtWidgets import QApplication
+    from app import theme
+    from app.widgets.window import ResultsWindow
+
+    QApplication.setApplicationName("AIGC Detector")
+    app = QApplication(sys.argv[:1])
     app.setStyleSheet(theme.STYLESHEET)
     theme.apply_matplotlib_style()
 
-    if len(sys.argv) > 1:
-        start_dir = sys.argv[1]
-        if not os.path.isdir(start_dir):
-            print(f"not a directory: {start_dir}", file=sys.stderr)
-            start_dir = None
-    else:
-        start_dir = check_dev_dataset(dev_dataset_dir())
-
-    window = MainWindow(start_dir=start_dir)
+    window = ResultsWindow(dataset, result, robustness, DEFAULT_THRESHOLD)
     window.show()
     return app.exec()
 

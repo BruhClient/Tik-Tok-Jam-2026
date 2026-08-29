@@ -1,4 +1,4 @@
-"""PRODUCTION entry point: score any image directory, write predictions.json.
+"""PRODUCTION script: score any image directory, write predictions.json.
 
     python predict.py <image_dir>
     python predict.py <image_dir> --out results.json --detector heuristic
@@ -12,12 +12,10 @@ Output is the required deliverable format:
 
 `pred` is P(AI-generated) in [0, 1]. No labels, no folder structure and no GUI
 are required - point it at any directory and it scores every image it finds,
-recursively. If the directory happens to be labeled (real/ + ai/ subfolders, a
-labels.csv, or real_/ai_ filename prefixes) an accuracy summary is printed as
-well; otherwise that section is simply skipped.
+recursively. If the directory happens to be labeled, an accuracy summary is
+printed too; otherwise that section is skipped.
 
-main.py is the interactive console; this is the batch path. Both share the same
-detector registry, so a model registered once works in both.
+Visualise the output afterwards with:  python main.py <out.json>
 """
 
 from __future__ import annotations
@@ -25,23 +23,12 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from app.dataset import scan_directory                     # noqa: E402
-from app.detectors import available_detectors, get_detector  # noqa: E402
+from app import runner                                          # noqa: E402
+from app.detectors import available_detectors                   # noqa: E402
 from app.export import export_predictions_json, export_run_report  # noqa: E402
-from app import metrics as M                               # noqa: E402
-from app.state import RunResult                            # noqa: E402
-
-
-def default_detector_name() -> str:
-    """Prefer a real backend; fall back to the best placeholder available."""
-    detectors = available_detectors()          # real backends sort first
-    if not detectors:
-        raise RuntimeError("no detectors registered")
-    return detectors[0].name
 
 
 def parse_args(argv=None):
@@ -50,14 +37,13 @@ def parse_args(argv=None):
         description="Score an image directory for AI-generated content.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("directory", nargs="?",
-                    help="directory of images, searched recursively")
+    ap.add_argument("directory", nargs="?", help="directory of images, searched recursively")
     ap.add_argument("--out", "-o", default="predictions.json",
                     help="output JSON path (default: predictions.json)")
     ap.add_argument("--detector", "-d", default=None,
                     help="registered detector name (default: first real backend)")
     ap.add_argument("--threshold", "-t", type=float, default=0.5,
-                    help="decision threshold used for the printed summary (default: 0.5)")
+                    help="threshold for the printed summary only (default: 0.5)")
     ap.add_argument("--relative", action="store_true",
                     help="write paths relative to the input directory")
     ap.add_argument("--report", default=None,
@@ -82,80 +68,20 @@ def main(argv=None) -> int:
         print("error: an image directory is required "
               "(use --list-detectors to inspect backends)", file=sys.stderr)
         return 2
-    if not os.path.isdir(args.directory):
-        print(f"error: not a directory: {args.directory}", file=sys.stderr)
-        return 2
 
-    ds = scan_directory(args.directory)
-    if not ds.items:
-        print(f"error: no images found under {args.directory}", file=sys.stderr)
-        return 2
+    runner.QUIET = args.quiet
+    dataset, result = runner.run_directory(args.directory, args.detector, total_steps=5)
 
-    name = args.detector or default_detector_name()
-    try:
-        detector = get_detector(name)
-    except KeyError:
-        print(f"error: unknown detector {name!r}. Available: "
-              + ", ".join(c.name for c in available_detectors()), file=sys.stderr)
-        return 2
-
-    log = (lambda *a, **k: None) if args.quiet else (
-        lambda *a, **k: print(*a, file=sys.stderr, **k))
-
-    log(f"directory : {os.path.abspath(args.directory)}")
-    log(f"images    : {len(ds):,}"
-        + (f"  ({ds.skipped} non-image files skipped)" if ds.skipped else ""))
-    log(f"detector  : {detector.display_name}")
-    if detector.is_placeholder:
-        log("WARNING   : this is a PLACEHOLDER backend - the scores are not "
-            "real detections.")
-
-    detector.ensure_loaded()
-
-    paths = [it.path for it in ds.items]
-    scores, failures = [], []
-    bs = max(1, detector.batch_size)
-    started = time.perf_counter()
-
-    for start in range(0, len(paths), bs):
-        chunk = paths[start:start + bs]
-        try:
-            scores.extend(float(s) for s in detector.predict_batch(chunk))
-        except Exception as exc:                      # keep going on a bad batch
-            failures.extend((p, str(exc)) for p in chunk)
-            scores.extend([float("nan")] * len(chunk))
-        if not args.quiet:
-            done = min(start + bs, len(paths))
-            pct = 100.0 * done / len(paths)
-            print(f"\r  scoring {done:,}/{len(paths):,} ({pct:.0f}%)",
-                  end="", file=sys.stderr, flush=True)
-    elapsed = time.perf_counter() - started
-    log("")
-
-    run = RunResult(detector_name=detector.name, detector_display=detector.display_name,
-                    is_placeholder=detector.is_placeholder, scores=scores,
-                    elapsed=elapsed, failures=failures)
-
-    n = export_predictions_json(args.out, ds, run, relative=args.relative)
-    log(f"wrote {n:,} predictions to {os.path.abspath(args.out)} in {elapsed:.1f}s"
-        + (f"  ({len(failures)} failed to decode)" if failures else ""))
-
-    # optional accuracy summary - only when the directory carries labels
-    if ds.has_labels:
-        y, s = run.valid_pairs(ds)
-        m = M.compute_metrics(y, s, args.threshold)
-        log("")
-        log(f"labels    : {ds.label_source_detail}")
-        log(f"threshold : {args.threshold:.2f}")
-        log(f"accuracy  : {M.fmt(m.accuracy)}   AUC: {M.fmt(m.auc, pct=False)}   "
-            f"F1: {M.fmt(m.f1, pct=False)}")
-        log(f"FPR       : {M.fmt(m.fpr)}   (authentic images flagged as AI)")
-        log(f"confusion : TP {m.tp}  FP {m.fp}  TN {m.tn}  FN {m.fn}")
-
+    runner.step(4, 5, "writing")
+    n = export_predictions_json(args.out, dataset, result, relative=args.relative)
+    runner.log(f"{n:,} predictions -> {os.path.abspath(args.out)}", indent=6)
     if args.report:
-        export_run_report(args.report, ds, run, args.threshold)
-        log(f"wrote report to {os.path.abspath(args.report)}")
+        export_run_report(args.report, dataset, result, args.threshold)
+        runner.log(f"run report    -> {os.path.abspath(args.report)}", indent=6)
 
+    runner.summarize(dataset, result, args.threshold, total_steps=5, step_no=5)
+    runner.log("")
+    runner.log(f"visualise it:  python main.py {args.out}")
     return 0
 
 
