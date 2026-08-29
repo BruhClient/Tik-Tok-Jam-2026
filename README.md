@@ -16,11 +16,13 @@ metrics, charts, exports — is real and final.
 ```bash
 pip install -r requirements.txt
 
-# generate a synthetic labeled set to play with (optional)
-python tools/make_dummy_dataset.py --out sample_data --n 400
-
-python main.py                 # or: python main.py sample_data
+python main.py                       # then Load directory / Ctrl+O / drag-drop
+python main.py sample_data           # or open a directory straight away
+python main.py "C:\path\to\images"
 ```
+
+Drop your own images into `sample_data/real/` and `sample_data/ai/` to have a
+fixture that loads with one command, or point the app at any directory.
 
 ## Screens
 
@@ -125,6 +127,5 @@ app/
   detectors/               plugin interface + placeholder backends
   widgets/                 main window, three tabs, grid, charts, components
 tools/
-  make_dummy_dataset.py    synthetic labeled data for UI testing
   predict_dir.py           headless directory -> predictions.json
 ```
