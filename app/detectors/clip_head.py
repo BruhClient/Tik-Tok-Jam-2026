@@ -17,11 +17,17 @@ at run time and nothing has to match a config kept somewhere else:
 
 Scoring reproduces the training pipeline exactly, in this order:
 
+    JPEG re-encode at q92                                  (SOURCE_JPEG_Q)
     resize shortest side to 224 (bicubic) -> centre crop 224
     CLIP normalisation (not ImageNet - the constants differ)
     vision tower -> pooler_output -> visual_projection      (feature="proj")
     L2-normalise -> (x - mu) / sd
     head -> logit -> sigmoid(platt_a * logit + platt_b)
+
+That first step is easy to mistake for an optimisation and delete. Training
+re-encoded every image, of both classes, before it was ever seen - so mu, sd,
+the Platt coefficients and the threshold were all fitted on re-encoded
+features. A pristine PNG scored without it is off-distribution.
 
 That last step matters. Training used pos_weight and a CVaR objective, both of
 which distort the output scale, so a raw sigmoid(logit) is a confidence number
@@ -31,6 +37,7 @@ validation scores, which is what makes `pred` safe to show as "% likely AI".
 
 from __future__ import annotations
 
+import io
 import os
 
 import numpy as np
@@ -46,9 +53,21 @@ RES = 224
 CLIP_MEAN = (0.48145466, 0.45782750, 0.40821073)
 CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 
+# Training re-encoded every image at a random JPEG quality in 85-98
+# (augment.normalise_source) so the head could not learn "real photos are
+# JPEG, generated ones are PNG" instead of learning the actual task. That
+# means every feature the head ever saw came from a re-encoded image, so
+# scoring has to do it too. The midpoint is used rather than a random draw:
+# inference has to be deterministic and not depend on file ordering.
+SOURCE_JPEG_Q = 92
+
 # PIL opens anything; a corrupt header can claim gigapixels. Same cap the
 # training loader used, so the two agree on what counts as unreadable.
+# PIL's own decompression-bomb guard trips at 178M px, well under that cap,
+# and _open would turn it into a silent NaN - so disable it (as clipfeat.py
+# does) and let the explicit check be the one that decides.
 MAX_PIXELS = 200_000_000
+Image.MAX_IMAGE_PIXELS = None
 
 DEFAULT_WEIGHTS = os.path.join("models", "bundle.pt")
 
@@ -107,7 +126,6 @@ class ClipHeadDetector(Detector):
         f"Loads the self-contained bundle at {DEFAULT_WEIGHTS}; the output is "
         "Platt-calibrated, so it reads as a probability."
     )
-    is_placeholder = False
     requires_weights = True
     default_weights = DEFAULT_WEIGHTS
     # CLIP ViT-L/14 is ~300M params. 16 keeps CPU memory sane and the progress
@@ -149,7 +167,13 @@ class ClipHeadDetector(Detector):
 
         self._torch = torch
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.note(f"torch {torch.__version__} · device {str(self.device).upper()}"
+                  + ("" if self.device.type == "cuda" else " (no CUDA device)"))
 
+        # By far the longest step, and torch.load gives no callback to hang a
+        # percentage on - so say how much is coming instead of pretending.
+        size_gb = os.path.getsize(path) / 1e9
+        self.note(f"reading {os.path.basename(path)} ({size_gb:.2f} GB) from disk")
         bundle = torch.load(path, map_location="cpu", weights_only=False)
         missing = {"clip_config", "clip_state_dict", "head_state_dict",
                    "head_dim", "mu", "sd"} - set(bundle)
@@ -167,18 +191,27 @@ class ClipHeadDetector(Detector):
 
         # Build the tower from the bundled config rather than by name: no
         # network access, and no chance of drifting from the weights.
+        name = bundle.get("clip_model_name", "CLIP vision tower")
+        self.note(f"building {name}")
         cfg = CLIPVisionConfig(**bundle["clip_config"])
         clip = CLIPVisionModelWithProjection(cfg)
+        self.note(f"loading {len(bundle['clip_state_dict']):,} tower tensors")
         clip.load_state_dict(bundle["clip_state_dict"], strict=True)
+        n_params = sum(p.numel() for p in clip.parameters())
+        self.note(f"tower ready · {n_params / 1e6:.0f}M frozen parameters"
+                  f" · moving to {str(self.device).upper()}")
         clip.eval().to(self.device)
         for p in clip.parameters():
             p.requires_grad_(False)
         self.clip = clip
 
         hc = bundle.get("head_config") or {}
+        hidden = int(hc.get("hidden", 512))
+        self.note(f"loading {hc.get('head', 'mlp')} head "
+                  f"{int(bundle['head_dim'])} -> {hidden} -> {hidden // 2} -> 1")
         head = _head_class(torch)(
             int(bundle["head_dim"]), hc.get("head", "mlp"),
-            int(hc.get("hidden", 512)), float(hc.get("dropout", 0.3)))
+            hidden, float(hc.get("dropout", 0.3)))
         head.load_state_dict(bundle["head_state_dict"], strict=True)
         head.eval().to(self.device)
         self.head = head
@@ -192,6 +225,8 @@ class ClipHeadDetector(Detector):
         # on real images, which pushes it well up the scale.
         self.default_threshold = 1.0 / (
             1.0 + np.exp(-(self.platt_a * self.threshold_logit + self.platt_b)))
+        self.note(f"ready · feature={self.feature} · preproc={self.preproc}"
+                  f" · operating point {self.default_threshold:.3f}")
 
     def unload(self) -> None:
         self.clip = None
@@ -246,6 +281,23 @@ class ClipHeadDetector(Detector):
         raise ValueError(f"unknown feature {self.feature!r}")
 
     # -- preprocessing -----------------------------------------------------
+    def prepare_source(self, img: Image.Image) -> Image.Image:
+        """Re-encode as JPEG, exactly as training did to every image.
+
+        Mirrors augment.op_jpeg. subsampling=2 (4:2:0) is not incidental -
+        it is what the training re-encode used, and chroma subsampling is
+        precisely the kind of high-frequency damage this model is asked to
+        see through. The sweep calls this before its own transforms, so a
+        degraded image is re-encoded first and degraded second, as in training.
+        """
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=SOURCE_JPEG_Q,
+                                subsampling=2)
+        buf.seek(0)
+        out = Image.open(buf)
+        out.load()
+        return out.convert("RGB")
+
     def _open(self, path: str):
         """Decode at full resolution - no size cap.
 
@@ -258,7 +310,7 @@ class ClipHeadDetector(Detector):
             w, h = img.size
             if w * h > MAX_PIXELS:
                 return None
-            return img.convert("RGB")
+            return self.prepare_source(img.convert("RGB"))
         except Exception:
             return None
 

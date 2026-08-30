@@ -41,6 +41,9 @@ class ScoreWorker(QThread):
 
     finished_ok = pyqtSignal(object, object)      # dataset, RunResult
     failed = pyqtSignal(str)
+    #: phase, detail, done, total, note - Qt queues this to the GUI thread,
+    #: which is the only reason the pipeline may report from in here at all
+    progress = pyqtSignal(str, str, int, int, str)
 
     def __init__(self, directory: str, detector_name: str = None,
                  weights: str = None, label_mode=DS.LabelMode.AUTO, parent=None):
@@ -50,11 +53,14 @@ class ScoreWorker(QThread):
         self.weights = weights
         self.label_mode = label_mode
 
+    def _report(self, phase, detail="", done=0, total=0, note=""):
+        self.progress.emit(phase, detail, int(done), int(total), note)
+
     def run(self):
         try:
             dataset, result = runner.run_directory(
                 self.directory, self.detector_name, self.weights,
-                label_mode=self.label_mode)
+                label_mode=self.label_mode, progress=self._report)
             self.finished_ok.emit(dataset, result)
         except SystemExit as exc:                 # runner raises these for bad input
             self.failed.emit(str(exc))
@@ -68,14 +74,19 @@ class LoadWorker(QThread):
 
     finished_ok = pyqtSignal(object, object)
     failed = pyqtSignal(str)
+    progress = pyqtSignal(str, str, int, int, str)
 
     def __init__(self, json_path: str, parent=None):
         super().__init__(parent)
         self.json_path = json_path
 
+    def _report(self, phase, detail="", done=0, total=0, note=""):
+        self.progress.emit(phase, detail, int(done), int(total), note)
+
     def run(self):
         try:
-            dataset, result = runner.load_predictions(self.json_path)
+            dataset, result = runner.load_predictions(self.json_path,
+                                                      progress=self._report)
             self.finished_ok.emit(dataset, result)
         except SystemExit as exc:
             self.failed.emit(str(exc))
@@ -90,6 +101,7 @@ class SweepWorker(QThread):
     cell_done = pyqtSignal(int, int, str)         # index, total, name
     finished_ok = pyqtSignal(object)              # SweepResult
     failed = pyqtSignal(str)
+    progress = pyqtSignal(str, str, int, int, str)
 
     def __init__(self, dataset, detector_name, cells, sample, max_side,
                  threshold, weights=None, parent=None):
@@ -106,14 +118,26 @@ class SweepWorker(QThread):
     def cancel(self):
         self._stop = True
 
+    def _report(self, phase, detail="", done=0, total=0, note=""):
+        self.progress.emit(phase, detail, int(done), int(total), note)
+
+    def _on_cell(self, i, n, name, metrics):
+        self.cell_done.emit(i, n, name)
+        self._report("sweep", name, i, n,
+                     f"acc {metrics.accuracy * 100:.1f}%"
+                     if metrics.accuracy == metrics.accuracy else "")
+
     def run(self):
         try:
             detector = runner.prepare_detector(
-                self.detector_name, self.weights, total_steps=3)
+                self.detector_name, self.weights, total_steps=3,
+                progress=self._report)
+            self._report("sweep", "starting the transform grid", 0,
+                         len(self.cells) + 1)
             result = sweep.run_sweep(
                 self.dataset, detector, self.cells,
                 sample=self.sample, max_side=self.max_side, threshold=self.threshold,
-                on_cell=lambda i, n, name, m: self.cell_done.emit(i, n, name),
+                on_cell=self._on_cell,
                 should_stop=lambda: self._stop,
             )
             self.finished_ok.emit(result)

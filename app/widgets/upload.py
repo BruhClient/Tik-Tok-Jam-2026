@@ -191,12 +191,8 @@ class UploadPage(QWidget):
         lay.addWidget(SectionTitle("Model"))
         self.detector_combo = QComboBox()
         for cls in available_detectors():
-            bits = []
-            if cls.is_placeholder:
-                bits.append("placeholder")
-            if cls.requires_weights and not cls.is_ready():
-                bits.append("no checkpoint")
-            suffix = "   ·   " + " · ".join(bits) if bits else ""
+            suffix = ("   ·   no checkpoint"
+                      if cls.requires_weights and not cls.is_ready() else "")
             self.detector_combo.addItem(cls.display_name + suffix, cls.name)
             self.detector_combo.setItemData(self.detector_combo.count() - 1,
                                             cls.description,

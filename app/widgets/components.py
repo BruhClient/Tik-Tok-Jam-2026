@@ -152,32 +152,6 @@ class Hint(QLabel):
         )
 
 
-class PlaceholderBanner(QFrame):
-    """Amber warning shown while a stub detector is selected."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("banner")
-        self.setStyleSheet(
-            f"#banner {{ background-color: {T.WARN_BG};"
-            f" border: 1px solid {T.WARN_BORDER};"
-            f" border-radius: {T.R_CARD}px; }}"
-        )
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 8, 12, 8)
-        icon = QLabel("⚠")
-        icon.setStyleSheet(f"color: {T.WARN}; font-size: 15px; background: transparent;")
-        self.label = QLabel("Placeholder detector — numbers below are not real results.")
-        self.label.setStyleSheet(
-            f"color: {T.WARN}; font-size: 12px; font-weight: 600; background: transparent;"
-        )
-        lay.addWidget(icon)
-        lay.addWidget(self.label, 1)
-
-    def set_text(self, text: str):
-        self.label.setText(text)
-
-
 class EmptyState(QWidget):
     """Centred message for panels with nothing to show yet."""
 

@@ -78,7 +78,6 @@ def build_run_report(dataset, run, threshold: float) -> dict:
         "detector": {
             "name": run.detector_name,
             "display_name": run.detector_display,
-            "is_placeholder": run.is_placeholder,
         },
         "run": {
             "elapsed_seconds": round(run.elapsed, 3),

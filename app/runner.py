@@ -56,6 +56,30 @@ def warn(message: str) -> None:
     print("  ! " + message, file=sys.stderr, flush=True)
 
 
+def _noop_progress(phase: str, detail: str = "", done: int = 0,
+                   total: int = 0, note: str = "") -> None:
+    """The default listener: nothing is watching, so nothing is reported.
+
+    Every entry point calls the pipeline the same way; only the GUI passes a
+    real callback. Keeping it a plain argument rather than module state means
+    two runs can never narrate into each other.
+    """
+
+
+def _eta_text(done: int, total: int, started: float) -> str:
+    """Rate and time-remaining, in the form the working screen shows them."""
+    elapsed = time.perf_counter() - started
+    if done <= 0 or elapsed <= 0:
+        return ""
+    rate = done / elapsed
+    remaining = (total - done) / rate if rate > 0 else 0.0
+    if remaining < 1:
+        return f"{rate:.1f} img/s"
+    minutes, seconds = divmod(int(remaining), 60)
+    left = f"{minutes}:{seconds:02d}" if minutes else f"{seconds}s"
+    return f"{rate:.1f} img/s · {left} left"
+
+
 def _progress(done: int, total: int, started: float) -> None:
     if QUIET:
         return
@@ -77,7 +101,6 @@ def _progress(done: int, total: int, started: float) -> None:
 class RunResult:
     detector_name: str = ""
     detector_display: str = ""
-    is_placeholder: bool = True
     scores: list = field(default_factory=list)      # aligned with dataset.items
     elapsed: float = 0.0
     failures: list = field(default_factory=list)    # (path, message)
@@ -106,10 +129,10 @@ class RunResult:
 def default_detector_name(weights: str = None) -> str:
     """The best backend available right now.
 
-    available_detectors() already ranks a ready real model above the
-    placeholders, so this returns the trained model once its checkpoint exists
-    and a placeholder until then. A bare --weights picks the backend that takes
-    one, since that is unambiguously what was meant.
+    available_detectors() ranks a backend whose checkpoint is present above
+    one whose checkpoint is missing, so this returns the model that can
+    actually run. A bare --weights picks the backend that takes one, since that
+    is unambiguously what was meant.
     """
     if weights:
         takers = weights_detectors()
@@ -121,7 +144,7 @@ def default_detector_name(weights: str = None) -> str:
     return detectors[0].name
 
 
-def load_detector(name: str = None, weights: str = None):
+def load_detector(name: str = None, weights: str = None, progress_cb=None):
     name = name or default_detector_name(weights)
     try:
         detector = get_detector(name, weights)
@@ -137,6 +160,9 @@ def load_detector(name: str = None, weights: str = None):
             f"       put one there, pass --weights <file>, or pick another "
             f"backend with --detector.")
 
+    # Set on the instance, not the class: ensure_loaded() is where the slow
+    # work happens, so the listener has to be in place before it is called.
+    detector.progress_cb = progress_cb
     detector.ensure_loaded()
     return detector
 
@@ -146,17 +172,19 @@ def load_detector(name: str = None, weights: str = None):
 # --------------------------------------------------------------------------- #
 
 def scan(directory: str, total_steps: int = 4,
-         label_mode: LabelMode = LabelMode.AUTO) -> Dataset:
+         label_mode: LabelMode = LabelMode.AUTO, progress=None) -> Dataset:
     """Scan a folder. LabelMode.NONE deliberately ignores any labels present.
 
     The GUI passes NONE when you said you were uploading plain images, so a
     folder that happens to hold real/ and ai/ is still scored as unlabeled -
     the screen you land on is the one you asked for.
     """
+    progress = progress or _noop_progress
     step(1, total_steps, f"scanning  {os.path.abspath(directory)}")
     if not os.path.isdir(directory):
         raise SystemExit(f"error: not a directory: {directory}")
 
+    progress("scan", f"walking {os.path.abspath(directory)}")
     started = time.perf_counter()
     ds = scan_directory(directory, mode=label_mode)
     took = time.perf_counter() - started
@@ -175,15 +203,28 @@ def scan(directory: str, total_steps: int = 4,
         log("labels ignored - scoring as unlabeled", indent=6)
     else:
         log("no labels found - scores only, no accuracy metrics", indent=6)
+
+    found = f"{len(ds):,} images"
+    if ds.has_labels:
+        found += f" · {ds.n_real:,} real / {ds.n_ai:,} AI"
+    elif label_mode == LabelMode.NONE:
+        found += " · labels ignored, scoring blind"
+    else:
+        found += " · no labels, scores only"
+    progress("scan", found, len(ds), len(ds))
     return ds
 
 
-def score(ds: Dataset, detector, total_steps: int = 4) -> RunResult:
+def score(ds: Dataset, detector, total_steps: int = 4, progress=None) -> RunResult:
+    progress = progress or _noop_progress
     step(3, total_steps, "scoring")
     paths = [it.path for it in ds.items]
     scores, failures = [], []
     bs = max(1, int(getattr(detector, "batch_size", 16)))
+    n_batches = (len(paths) + bs - 1) // bs
     started = time.perf_counter()
+    progress("score", f"0 of {len(paths):,} images · {bs} per batch",
+             0, len(paths))
 
     for start in range(0, len(paths), bs):
         chunk = paths[start:start + bs]
@@ -195,13 +236,18 @@ def score(ds: Dataset, detector, total_steps: int = 4) -> RunResult:
             failures.extend((p, str(exc)) for p in chunk)
             batch = [float("nan")] * len(chunk)
         scores.extend(batch)
-        _progress(min(start + bs, len(paths)), len(paths), started)
+        done = min(start + bs, len(paths))
+        _progress(done, len(paths), started)
+        progress("score",
+                 f"batch {start // bs + 1:,} of {n_batches:,}"
+                 f" · {bs} images per batch"
+                 + (f" · {len(failures)} failed" if failures else ""),
+                 done, len(paths), _eta_text(done, len(paths), started))
 
     elapsed = time.perf_counter() - started
     result = RunResult(
         detector_name=detector.name,
         detector_display=detector.display_name,
-        is_placeholder=bool(getattr(detector, "is_placeholder", False)),
         scores=scores, elapsed=elapsed, failures=failures,
         source=ds.root,
         threshold=float(getattr(detector, "default_threshold", 0.5)),
@@ -215,24 +261,39 @@ def score(ds: Dataset, detector, total_steps: int = 4) -> RunResult:
     return result
 
 
-def prepare_detector(name: str = None, weights: str = None, total_steps: int = 4):
+def prepare_detector(name: str = None, weights: str = None, total_steps: int = 4,
+                     progress=None):
+    progress = progress or _noop_progress
     step(2, total_steps, "loading detector")
-    detector = load_detector(name, weights)
-    log(detector.display_name, indent=6)
-    if detector.requires_weights:
-        log(f"weights {os.path.abspath(detector.resolve_weights(detector.weights))}",
-            indent=6)
-    if detector.is_placeholder:
-        warn("PLACEHOLDER backend - these scores are not real detections")
-    return detector
+
+    # Name the backend before loading it, not after. Loading is the slow part
+    # and now narrates itself, and that narration reads as noise under a
+    # heading that has not been printed yet.
+    resolved = name or default_detector_name(weights)
+    cls = next((c for c in available_detectors() if c.name == resolved), None)
+    if cls is not None:
+        log(cls.display_name, indent=6)
+        progress("model", cls.display_name)
+        if cls.requires_weights:
+            log(f"weights {os.path.abspath(cls.resolve_weights(weights))}",
+                indent=6)
+
+    def relay(message: str) -> None:
+        """Anything the detector says while loading goes to both listeners."""
+        log(message, indent=6)
+        progress("model", message)
+
+    return load_detector(resolved, weights, progress_cb=relay)
 
 
 def run_directory(directory: str, detector_name: str = None, weights: str = None,
-                  total_steps: int = 4, label_mode: LabelMode = LabelMode.AUTO):
+                  total_steps: int = 4, label_mode: LabelMode = LabelMode.AUTO,
+                  progress=None):
     """scan -> load detector -> score. Returns (Dataset, RunResult)."""
-    ds = scan(directory, total_steps, label_mode)
-    detector = prepare_detector(detector_name, weights, total_steps)
-    result = score(ds, detector, total_steps)
+    ds = scan(directory, total_steps, label_mode, progress=progress)
+    detector = prepare_detector(detector_name, weights, total_steps,
+                                progress=progress)
+    result = score(ds, detector, total_steps, progress=progress)
     return ds, result
 
 
@@ -240,9 +301,11 @@ def run_directory(directory: str, detector_name: str = None, weights: str = None
 # reading a finished predictions.json back in (GUI visualisation path)
 # --------------------------------------------------------------------------- #
 
-def load_predictions(json_path: str, total_steps: int = 2):
+def load_predictions(json_path: str, total_steps: int = 2, progress=None):
     """Rebuild (Dataset, RunResult) from a predictions.json written earlier."""
+    progress = progress or _noop_progress
     step(1, total_steps, f"reading  {os.path.abspath(json_path)}")
+    progress("read", os.path.basename(json_path))
     with open(json_path, "r", encoding="utf-8") as f:
         records = json.load(f)
     if not isinstance(records, list) or not records:
@@ -283,8 +346,9 @@ def load_predictions(json_path: str, total_steps: int = 2):
         warn(f"{missing} image file(s) referenced in the JSON no longer exist "
              "- previews will be blank")
 
-    result = RunResult(detector_name="(from file)", detector_display=os.path.basename(json_path),
-                       is_placeholder=False, scores=scores, source=os.path.abspath(json_path))
+    result = RunResult(detector_name="(from file)",
+                       detector_display=os.path.basename(json_path),
+                       scores=scores, source=os.path.abspath(json_path))
     return ds, result
 
 

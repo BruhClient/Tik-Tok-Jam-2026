@@ -181,18 +181,6 @@ Where the second screen goes follows from that choice:
 The threshold slider sits in the header and re-reads every view live.
 A `robustness_report.json` sitting next to the data is loaded automatically.
 
-## Placeholder backends
-
-Two stubs ship so the pipeline runs end to end before a checkpoint exists.
-
-| Name | What it is |
-| --- | --- |
-| `random` | Deterministic hash-based scores with a mild label-aware bias. |
-| `heuristic` | FFT high-frequency ratio, noise residual, saturation, detail uniformity and JPEG-quantisation evidence with hand-set weights. A baseline, not a trained model. |
-
-Both set `is_placeholder = True`, which drives the terminal warning and the
-window's amber dot. They stop being the default the moment real weights exist.
-
 ## Sample dataset
 
 `sample_data/` is the folder the GUI offers by default — 100 authentic and 100
@@ -224,8 +212,6 @@ app/
     base.py                plugin interface + registry
     clip_head.py           THE model: CLIP ViT-L/14 + trained MLP head
     trained.py             generic slot for any other models/model.pt
-    heuristic_stub.py      placeholder
-    random_stub.py         placeholder
   widgets/
     window.py              app shell: upload screen, results header, run state
     upload.py              screen 1: declare the data, pick the folder

@@ -32,8 +32,21 @@ from ..workers import LoadWorker, ScanWorker, ScoreWorker, SweepWorker
 from . import components as C
 from .components import Dot, Tab
 from .gallery import GalleryPage
+from .loading import LoadingOverlay
 from .pages import ImagesPage, InsightsPage, RobustnessPage
 from .upload import UploadPage
+
+#: the steps a scoring run takes, in order, as the working screen lists them
+RUN_PHASES = [("scan", "Scanning the folder"),
+              ("model", "Loading the detector"),
+              ("score", "Scoring images")]
+
+#: reading a finished predictions.json back in - one step, but the screen is
+#: the same one, so a fast path never looks like a different app
+READ_PHASES = [("read", "Reading predictions")]
+
+#: The sweep gets no overlay - it is cancellable, and a scrim would bury the
+#: Cancel button - so it reports into the robustness page's own status line.
 
 SCREEN_UPLOAD, SCREEN_RESULTS = range(2)
 TAB_INSIGHTS, TAB_IMAGES, TAB_ROBUSTNESS, VIEW_GALLERY = range(4)
@@ -78,6 +91,11 @@ class AppWindow(QMainWindow):
         self.screens.addWidget(self.upload_page)
         self.screens.addWidget(self._build_results())
         self.setCentralWidget(self.screens)
+
+        # Sits above every screen and covers the whole window. Created last so
+        # it stacks on top, and kept sized to the window by resizeEvent.
+        self.overlay = LoadingOverlay(self)
+        self.overlay.setGeometry(self.rect())
 
         self._chart_timer = QTimer(self)
         self._chart_timer.setSingleShot(True)
@@ -306,12 +324,9 @@ class AppWindow(QMainWindow):
         self.counts_label.setText(counts)
 
         if self.result is not None:
-            self.detector_label.setText(
-                self.result.detector_display.replace(" (placeholder)", ""))
-            placeholder = self.result.is_placeholder
-            self.detector_dot.set_color(T.WARN if placeholder else T.GOOD)
-            tip = ("Placeholder backend — these scores are not real detections."
-                   if placeholder else "Model backend")
+            self.detector_label.setText(self.result.detector_display)
+            self.detector_dot.set_color(T.GOOD)
+            tip = "Model backend"
             if self.result.elapsed:
                 tip += f"\nScored in {self.result.elapsed:.1f}s"
             self.detector_dot.setToolTip(tip)
@@ -319,6 +334,18 @@ class AppWindow(QMainWindow):
 
         self.export_btn.setEnabled(self.result is not None and self.result.n_scored > 0)
         self.best_btn.setEnabled(self.dataset.has_labels)
+
+    # -- the working screen ------------------------------------------------
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.overlay.setGeometry(self.rect())
+
+    def _on_progress(self, phase: str, detail: str, done: int, total: int,
+                     note: str):
+        """One slot for every worker: they all report in the same shape."""
+        self.overlay.set_phase(phase, detail)
+        if total > 0 or note:
+            self.overlay.set_progress(done, total, note)
 
     # -- running -----------------------------------------------------------
     def start_run(self, label_mode: LabelMode = None):
@@ -336,8 +363,10 @@ class AppWindow(QMainWindow):
         runner.log(f"=== Detect {directory} ===")
 
         self.upload_page.set_busy(True, "Working — detailed progress in the terminal.")
+        self.overlay.begin(RUN_PHASES, "Scanning the folder")
         self.worker = ScoreWorker(directory, self.upload_page.detector_name,
                                   self.upload_page.weights, label_mode, parent=self)
+        self.worker.progress.connect(self._on_progress)
         self.worker.finished_ok.connect(self._on_run_done)
         self.worker.failed.connect(self._on_run_failed)
         self.worker.start()
@@ -366,13 +395,16 @@ class AppWindow(QMainWindow):
         runner.log("")
         runner.log(f"=== Open {path} ===")
         self.upload_page.set_busy(True, "Reading predictions…")
+        self.overlay.begin(READ_PHASES, "Reading predictions")
         self.worker = LoadWorker(path, parent=self)
+        self.worker.progress.connect(self._on_progress)
         self.worker.finished_ok.connect(self._on_run_done)
         self.worker.failed.connect(self._on_run_failed)
         self.worker.start()
 
     def _on_run_done(self, dataset, result):
         self.worker = None
+        self.overlay.finish()
         self.dataset = dataset
         self.result = result
         self.robustness = {}
@@ -400,6 +432,7 @@ class AppWindow(QMainWindow):
 
     def _on_run_failed(self, message: str):
         self.worker = None
+        self.overlay.finish()
         self.upload_page.set_busy(False, "Failed.")
         QMessageBox.critical(self, "Run failed", message)
 
@@ -431,11 +464,20 @@ class AppWindow(QMainWindow):
             self.robustness_page.sample_spin.value(),
             self.robustness_page.side_spin.value(),
             self.threshold, self.upload_page.weights, parent=self)
-        self.sweep_worker.cell_done.connect(
-            lambda i, n, name: self.robustness_page.set_busy(True, f"{i}/{n}  {name}"))
+        # Deliberately not the overlay: the sweep is the one job that can be
+        # cancelled, and a scrim over the window would bury the Cancel button.
+        # It reports into the page's own status line instead.
+        self.sweep_worker.progress.connect(self._on_sweep_progress)
         self.sweep_worker.finished_ok.connect(self._on_sweep_done)
         self.sweep_worker.failed.connect(self._on_sweep_failed)
         self.sweep_worker.start()
+
+    def _on_sweep_progress(self, phase: str, detail: str, done: int, total: int,
+                           note: str):
+        text = f"{done}/{total}  {detail}" if phase == "sweep" and total else detail
+        if note:
+            text += f"   ·   {note}"
+        self.robustness_page.set_busy(True, text)
 
     def cancel_sweep(self):
         if self.sweep_worker is not None:

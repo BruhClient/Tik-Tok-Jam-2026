@@ -31,7 +31,6 @@ class SweepResult:
     n_images: int = 0
     elapsed: float = 0.0
     detector_display: str = ""
-    is_placeholder: bool = True
     dataset_root: str = ""
 
     # -- views -------------------------------------------------------------
@@ -72,7 +71,6 @@ class SweepResult:
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "dataset_root": self.dataset_root,
             "detector": self.detector_display,
-            "is_placeholder": self.is_placeholder,
             "threshold": self.threshold,
             "sample_size": self.n_images,
             "elapsed_seconds": round(self.elapsed, 2),
@@ -152,9 +150,10 @@ def score_cell(detector, paths, labels, spec, severity: int, max_side: int):
         for j, p in enumerate(chunk):
             try:
                 img = load_image(p, max_side)
+                # before the transform, not after: training conditioned the
+                # source first and degraded second
+                img = detector.prepare_source(img)
                 img = spec.apply(img, severity) if severity else img
-                img._aigc_source = p          # hint only the placeholder reads
-                img._aigc_severity = severity
                 images.append(img)
                 chunk_labels.append(labels[start + j])
             except Exception as exc:
@@ -186,7 +185,6 @@ def run_sweep(dataset, detector, cells: list, sample: int = 200,
     out = SweepResult(
         threshold=threshold, n_images=len(paths),
         detector_display=detector.display_name,
-        is_placeholder=bool(getattr(detector, "is_placeholder", False)),
         dataset_root=dataset.root,
     )
     started = time.perf_counter()

@@ -1,12 +1,12 @@
 """The trained model: loads a checkpoint from disk and scores images with it.
 
-This is the real backend. It ships wired but with no weights - drop a
-checkpoint at models/model.pt (or pass --weights) and every entry point starts
-using it automatically, because available_detectors() ranks a ready real
-backend above the placeholders.
+This is the generic backend. It ships wired but with no weights - drop a
+checkpoint at models/model.pt (or pass --weights) and it is ready to run.
+clip_head sorts ahead of it while models/bundle.pt is there, so ask for this
+one by name:
 
-    python detect.py <dir>                          uses models/model.pt
-    python detect.py <dir> --weights runs/best.pt   uses that instead
+    python detect.py <dir> --detector trained          uses models/model.pt
+    python detect.py <dir> --detector trained         --weights runs/best.pt                         uses that instead
 
 Two checkpoint shapes load with no code changes:
 
@@ -72,7 +72,6 @@ class TrainedDetector(Detector):
         "scores images with it. Point --weights at a file, or leave it at "
         f"{DEFAULT_WEIGHTS}."
     )
-    is_placeholder = False
     requires_weights = True
     default_weights = DEFAULT_WEIGHTS
     batch_size = 32

@@ -12,7 +12,6 @@ architecture code:
         name = "my_model"
         display_name = "EfficientNet-B0 + FFT head"
         description = "Trained on ..."
-        is_placeholder = False
 
         def load(self):
             self.model = torch.load(...)
@@ -44,7 +43,6 @@ class Detector(ABC):
     name: str = "base"
     display_name: str = "Base detector"
     description: str = ""
-    is_placeholder: bool = False
     # Recommended images per predict_batch call; smaller = smoother progress.
     batch_size: int = 16
 
@@ -60,8 +58,18 @@ class Detector(ABC):
     default_weights: str = ""
     weights: str | None = None
 
+    #: optional callback(str), set by the runner. Lets a slow load() say what
+    #: it is doing instead of blocking silently - loading a gigabyte-plus
+    #: bundle is long enough that a caller with a UI needs to show something.
+    progress_cb = None
+
     def __init__(self):
         self._loaded = False
+
+    def note(self, message: str) -> None:
+        """Narrate a slow step. Does nothing unless someone is listening."""
+        if self.progress_cb is not None:
+            self.progress_cb(message)
 
     # -- readiness ---------------------------------------------------------
     @classmethod
@@ -120,6 +128,17 @@ class Detector(ABC):
                     pass
 
     # -- helpers -----------------------------------------------------------
+    def prepare_source(self, img: Image.Image) -> Image.Image:
+        """Normalise a freshly decoded image before any degradation is applied.
+
+        Identity by default. A detector whose training pipeline conditioned the
+        source - e.g. a JPEG re-encode to kill the format shortcut, where the
+        real photos arrive as JPEG and the generated ones as PNG - overrides
+        this. The robustness sweep calls it before its own transforms, so the
+        ordering matches the one the model was trained under.
+        """
+        return img
+
     @staticmethod
     def open_image(path: str, max_side: int = 1024) -> Image.Image:
         """Decode with a size cap; JPEG draft mode keeps big files cheap."""
@@ -147,12 +166,12 @@ def register(cls):
 def available_detectors() -> list:
     """Registered detector classes, best-first.
 
-    A ready real backend outranks a placeholder, which outranks a backend whose
-    checkpoint is missing. So the trained slot sits at the bottom until weights
-    exist, then becomes the default everywhere with no flag to flip.
+    A backend whose checkpoint is present outranks one whose checkpoint is
+    missing, so an empty slot sits at the bottom until weights exist and then
+    becomes usable everywhere with no flag to flip.
     """
     return sorted(_REGISTRY.values(),
-                  key=lambda c: (not c.is_ready(), c.is_placeholder, c.display_name))
+                  key=lambda c: (not c.is_ready(), c.display_name))
 
 
 def weights_detectors() -> list:

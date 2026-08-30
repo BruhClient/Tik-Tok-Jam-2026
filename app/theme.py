@@ -65,8 +65,6 @@ WARN = "#E0A32E"
 GOOD = "#3FB950"
 BAD = "#F85149"
 
-WARN_BG = "#241D0C"          # the placeholder banner
-WARN_BORDER = "#3E3316"
 
 REAL_COLOR = "#22D3C5"       # authentic
 AI_COLOR = "#FE2C55"         # generated

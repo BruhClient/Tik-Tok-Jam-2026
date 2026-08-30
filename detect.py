@@ -88,12 +88,8 @@ def _report(exc: SystemExit) -> int:
 
 def list_detectors() -> int:
     for cls in available_detectors():
-        bits = []
-        if cls.is_placeholder:
-            bits.append("PLACEHOLDER")
-        if cls.requires_weights and not cls.is_ready():
-            bits.append(f"no checkpoint at {cls.default_weights}")
-        tag = "  [" + " | ".join(bits) + "]" if bits else ""
+        tag = (f"  [no checkpoint at {cls.default_weights}]"
+               if cls.requires_weights and not cls.is_ready() else "")
         print(f"{cls.name:12s} {cls.display_name}{tag}")
         print(f"{'':12s} {cls.description}")
     print(f"\ndefault: {runner.default_detector_name()}")
