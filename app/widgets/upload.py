@@ -2,8 +2,8 @@
 
 The old Run page inferred the kind of data from the folder and quietly went
 whichever way the scan fell. Here the choice is explicit and enforced - you
-declare a labeled dataset or plain images, and the app either honours it or
-tells you the folder cannot support it. That is what decides which results
+declare labelled or unlabelled data, and the app either honours it or tells
+you the folder cannot support it. That is what decides which results
 screen you land on.
 
 The enforcement is the peek: a ScanWorker reads the folder in the background as
@@ -29,8 +29,9 @@ from ..detectors import available_detectors
 from . import components as C
 from .components import Card, Hint, SectionTitle
 
-#: the two upload kinds. MODE_IMAGES maps to LabelMode.NONE, which is what
-#: makes "just images" ignore labels that happen to be there.
+#: the two upload kinds - "Labelled data" and "Unlabelled data" on screen.
+#: MODE_IMAGES maps to LabelMode.NONE, which is what makes "Unlabelled data"
+#: ignore labels that happen to be there.
 MODE_LABELED, MODE_IMAGES = range(2)
 
 #: what the scanner tries, in order - quoted back when a labeled folder has none
@@ -105,7 +106,7 @@ class UploadPage(QWidget):
         self.app = app
         self.peek = None                   # Dataset from the last folder scan
         # None until you choose. Neither tile is preselected: defaulting to
-        # "labeled" would quietly make the choice this screen exists to ask.
+        # "Labelled data" would quietly make the choice this screen exists to ask.
         self.mode = None
 
         outer = QVBoxLayout(self)
@@ -165,10 +166,10 @@ class UploadPage(QWidget):
 
         lay.addWidget(SectionTitle("What are you uploading"))
         self.tiles = [
-            ModeTile("Labeled dataset",
+            ModeTile("Labelled data",
                      "A folder holding real/ and ai/. You get accuracy, AUC, "
                      "ROC and the robustness sweep."),
-            ModeTile("Just images",
+            ModeTile("Unlabelled data",
                      "Any folder of images. You get a verdict per image - "
                      "AI-generated or authentic."),
         ]
@@ -267,7 +268,7 @@ class UploadPage(QWidget):
 
     @property
     def label_mode(self) -> LabelMode:
-        """NONE for plain images, so a labeled folder is still scored blind."""
+        """NONE for unlabelled data, so a labelled folder is still scored blind."""
         return LabelMode.NONE if self.mode == MODE_IMAGES else LabelMode.AUTO
 
     def set_mode(self, mode: int):
@@ -355,12 +356,13 @@ class UploadPage(QWidget):
 
         count = f"{len(self.peek):,} images"
         if self.mode == MODE_IMAGES:
-            note = ("labels present but ignored — you asked for plain images"
+            note = ("labels present but ignored — you asked for unlabelled data"
                     if self.peek.has_labels else "no labels — verdicts only")
             return f"{count}   ·   {note}", T.TEXT_DIM, True
         if not self.peek.has_labels:
             return (f"{count}, but no labels. Looked for {LABEL_SOURCES}.\n"
-                    'Fix the folder, or choose "Just images" to score it anyway.',
+                    'Fix the folder, or choose "Unlabelled data" to score it '
+                    'anyway.',
                     T.BAD, False)
         source = self.peek.label_source_detail.split(" (")[0]
         return (f"{count}   ·   {self.peek.n_real:,} real / {self.peek.n_ai:,} AI"

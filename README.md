@@ -11,7 +11,9 @@ the window is the number the CLI printed.
 
 There is **no training step in this repository**. The model is trained
 elsewhere (see [Model provenance](#model-provenance)); this scores images with
-it and tells you how far you can trust the answer.
+it and tells you how far you can trust the answer. What this repo does own on
+the data side is the corpus the training consumed — see
+[Building the corpus](#building-the-corpus).
 
 ---
 
@@ -20,6 +22,7 @@ it and tells you how far you can trust the answer.
 - [Quick start](#quick-start)
 - [Commands](#commands)
 - [Model provenance](#model-provenance)
+- [Building the corpus](#building-the-corpus)
 - [The model](#the-model)
 - [Two kinds of input](#two-kinds-of-input)
 - [Output format](#output-format)
@@ -160,6 +163,90 @@ load time and printed in the run log:
 Point at either with `--weights models/bundle_cvar.pt`. Never hardcode an
 operating point from this table into anything: read it from the bundle, which is
 what the app does.
+
+---
+
+## Building the corpus
+
+The weights come from Joe's repo, but the corpus they were trained on is built
+here, by `tools/build_dataset.py`. It pools a dozen public datasets into one
+deduplicated `real/` + `ai/` tree and then splits it.
+
+```bash
+# local folders
+python tools/build_dataset.py ingest cifake \
+    --real "downloads/cifake/**/REAL" --ai "downloads/cifake/**/FAKE"
+
+# a Hugging Face parquet dataset, streamed and capped, kept out of training
+python tools/build_dataset.py ingest-hf openfake ComplexDataLab/OpenFake \
+    --splits test --stream --limit-per-class 2000 --dest heldout/openfake \
+    --real-labels real 0 --ai-labels fake 1
+
+python tools/build_dataset.py split --ratio 0.8 --seed 0
+python tools/build_dataset.py stats
+```
+
+| subcommand | what it does |
+| --- | --- |
+| `ingest` | pull in local folders or globs |
+| `ingest-hf` | pull a Hugging Face parquet dataset (images embedded as bytes) |
+| `ingest-urls` | download a single-class dataset that ships URLs, not images |
+| `merge` | fold another machine's pool export in |
+| `split` | write `data/{train,test}/{real,ai}` from the pool |
+| `stats` | count every destination |
+
+Three properties of the build matter more than the source list:
+
+**Every image is re-encoded to one JPEG quality on the way in** (`--jpeg-quality`,
+default 90). This is the same defence the detector's `prepare_source()` applies
+at inference: if reals arrive as JPEG and generated images as PNG, a model
+learns the container instead of the task. Normalising at ingest means the
+per-class compression tell is gone before anything is trained on it.
+
+**Deduplication is global and by pixel content, not by file.** Images are hashed
+after decoding, so the same picture re-encoded twice still collides, and the
+hash becomes the filename — which makes writes idempotent, lets parallel
+workers dedupe with no shared state, and reduces `merge` to copy-if-absent. One
+image lands in exactly one destination across every source.
+
+**Destinations keep the evaluation axes apart**, which is what stops a
+generalisation claim from being circular:
+
+| `--dest` | role |
+| --- | --- |
+| `_pool` (default) | the training corpus — `split` turns it into `train`/`test` |
+| `heldout/<name>` | generalisation check, **never trained on**; used directly as a test set |
+| `robustness` | platform-degradation validation |
+
+A held-out generator only means something if it was never in the pool, so the
+separation is enforced at ingest time rather than remembered later.
+
+### Pulling it in parallel
+
+`tools/run_worker.sh` is the roster version of the above: every laptop runs the
+same command under its own name, takes a disjoint round-robin slice of each
+dataset's shards, and pulls with no overlap.
+
+```bash
+tools/run_worker.sh <brennen|travis|dylan|joe> <num_workers> [cap_per_class_per_source]
+tools/run_worker.sh travis 4 15000
+```
+
+It walks the full source list — Tiny-GenImage and SID_Set for a labeled mix,
+CIFAKE as a warm-up, `bitmind` reals (MS-COCO, FFHQ, CelebA-HQ) against
+`bitmind` generators (SDXL, RealVis-XL, Mobius, FLUX.1-dev), then the two bulk
+sources that actually set the scale: **ELSA1M** for AI and **OpenImages V7**
+for real. Roughly 500–700k balanced images across four laptops at `CAP=15000`.
+OpenImages reals are URL downloads, so expect 20–30% to 404 or time out; that
+is handled and counted, not fatal. Each worker finishes by printing the `rsync`
+line that sends its pool to the main machine, where `merge` folds it in.
+
+`tools/predict_dir.py` is a headless `detect.py` against the same registry and
+writer — useful on a worker box with no display.
+
+> **Note on `CIFAKE`:** its labels are reversed relative to every other source
+> (`0=FAKE`, `1=REAL`), which is why `run_worker.sh` passes
+> `--real-labels 1 --ai-labels 0` for that one repo and nowhere else.
 
 ---
 
@@ -312,18 +399,18 @@ report sitting next to the data automatically.
 
 Two screens.
 
-**Screen 1 — upload.** You say what you are uploading, a **labeled dataset** or
-**just images**, then pick the folder. A background scan reports what is
-actually in it and refuses to run a labeled job on a folder with no labels.
-Choosing *just images* ignores any labels that are there, so what you asked for
-is what you get.
+**Screen 1 — upload.** You say what you are uploading, **Labelled data** or
+**Unlabelled data**, then pick the folder. A background scan reports what is
+actually in it and refuses to run a labelled job on a folder with no labels.
+Choosing *Unlabelled data* ignores any labels that are there, so what you asked
+for is what you get.
 
 **Screen 2 — results.** Where it goes follows from that choice:
 
 | you uploaded | you get |
 | --- | --- |
-| a labeled dataset | **Insights** — metric cards, score distribution, ROC and the confusion matrix — with **Images** (every prediction, filtered by all / FP / FN / AI / real, with a preview pane) and **Robustness** (transform picker, severity scale, degradation curve and cell table) behind header tabs |
-| just images | one verdict grid: every image badged AI or authentic, filterable, with no metrics — there is no truth to measure against |
+| Labelled data | **Insights** — metric cards, score distribution, ROC and the confusion matrix — with **Images** (every prediction, filtered by all / FP / FN / AI / real, with a preview pane) and **Robustness** (transform picker, severity scale, degradation curve and cell table) behind header tabs |
+| Unlabelled data | one verdict grid: every image badged AI or authentic, filterable, with no metrics — there is no truth to measure against |
 
 The threshold slider sits in the header and re-reads every view live. **Best
 F1** jumps to the F1-optimal threshold; **Reset** goes back to the model's own
@@ -446,6 +533,10 @@ app/
     table.py               predictions table model + score-bar delegate
     charts.py              histogram, ROC, PR, confusion, degradation
     components.py          cards, chips, badges, type scale
+tools/
+  build_dataset.py         pool public datasets -> deduplicated real/ai corpus
+  run_worker.sh            one laptop's disjoint share of the pull
+  predict_dir.py           headless detect.py, for a worker box with no display
 ```
 
 The dependency direction is one-way and worth preserving: `widgets/` may import
@@ -464,6 +555,21 @@ sample_data/
 ├── real/
 └── ai/
 ```
+
+`data/` is the much larger tree `tools/build_dataset.py` writes, in the same
+labeled layout at every level. Also gitignored — it is rebuilt, not cloned:
+
+```
+data/
+├── _pool/            everything ingested, deduplicated       -> real/ ai/
+├── train/  test/     the 80/20 split of the pool             -> real/ ai/
+├── heldout/<name>/   never trained on                        -> real/ ai/
+├── robustness/       degradation validation                  -> real/ ai/
+└── .hashes.txt       the global content-hash ledger
+```
+
+Delete `.hashes.txt` and a re-ingest will re-add everything it already has;
+keep it with the pool.
 
 ---
 
@@ -506,4 +612,8 @@ mid-way.
   [Model provenance](#model-provenance)).
 - Vision tower — `openai/clip-vit-large-patch14`, frozen, redistributed inside
   the bundle.
+- Training corpus — pooled from public datasets by `tools/build_dataset.py`:
+  Tiny-GenImage, SID_Set, CIFAKE, ELSA1M, OpenImages V7, and the `bitmind`
+  real/generator collections (MS-COCO, FFHQ, CelebA-HQ, SDXL, RealVis-XL,
+  Mobius, FLUX.1-dev). Each remains under its own licence.
 - This repository — inference, evaluation, the robustness lab and the window.

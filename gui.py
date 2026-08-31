@@ -4,10 +4,10 @@
     python gui.py <image_directory>     score that folder on launch
     python gui.py predictions.json      open a finished result file
 
-You say what you are uploading - a labeled dataset or plain images - and that
-decides what comes back. A labeled folder gives accuracy, charts and the
-failure list; plain images give a verdict on each picture and nothing that
-pretends to be a metric. The window is a front end over the same runner/sweep
+You say what you are uploading - labelled or unlabelled data - and that decides
+what comes back. A labelled folder gives accuracy, charts and the failure list;
+unlabelled data gives a verdict on each picture and nothing that pretends to be
+a metric. The window is a front end over the same runner/sweep
 code the CLI uses, so results are identical either way. Detailed progress still
 goes to this terminal; the window shows finished results.
 
