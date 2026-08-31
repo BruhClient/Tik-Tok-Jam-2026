@@ -6,3 +6,4 @@ predictions.json
 *_report.json
 models/*
 !models/.gitkeep
+venv/
