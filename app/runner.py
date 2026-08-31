@@ -327,11 +327,18 @@ def prepare_detector(name: str = None, weights: str = None, total_steps: int = 4
 
 def run_directory(directory: str, detector_name: str = None, weights: str = None,
                   total_steps: int = 4, label_mode: LabelMode = LabelMode.AUTO,
-                  progress=None):
-    """scan -> load detector -> score. Returns (Dataset, RunResult)."""
+                  progress=None, configure=None):
+    """scan -> load detector -> score. Returns (Dataset, RunResult).
+
+    `configure(detector)` runs after the backend is loaded and before scoring -
+    the seam a caller uses to set an inference option such as TTA on the loaded
+    instance, without this function having to know about it.
+    """
     ds = scan(directory, total_steps, label_mode, progress=progress)
     detector = prepare_detector(detector_name, weights, total_steps,
                                 progress=progress)
+    if configure is not None:
+        configure(detector)
     result = score(ds, detector, total_steps, progress=progress)
     return ds, result
 

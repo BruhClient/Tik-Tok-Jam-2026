@@ -56,6 +56,9 @@ def parse_args(argv=None):
     ap.add_argument("--threshold", "-t", type=float, default=None,
                     help="decision threshold for the reported accuracy "
                          "(default: the detector's own operating point, or 0.5)")
+    ap.add_argument("--tta", type=int, default=1, metavar="N",
+                    help="test-time augmentation: average N views per image "
+                         "(1 = off; 2 adds a flip; up to 4)")
     ap.add_argument("--out", "-o", default=None,
                     help=f"report path (default: <dir>/{SW.DEFAULT_REPORT})")
     ap.add_argument("--quiet", "-q", action="store_true")
@@ -115,6 +118,13 @@ def main(argv=None) -> int:
         detector = runner.prepare_detector(args.detector, args.weights, total_steps=4)
     except SystemExit as exc:
         return _report(exc)
+    if args.tta and args.tta > 1:
+        if hasattr(type(detector), "tta_views"):
+            detector.tta_views = args.tta
+            runner.log(f"test-time augmentation: {args.tta} views/image", indent=6)
+        else:
+            runner.warn(f"{detector.display_name} does not support TTA - "
+                        "scoring single-view")
     runner.step(3, 4, f"sweeping {len(cells) + 1} cells x up to {args.sample} images")
 
     try:
