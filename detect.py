@@ -69,6 +69,9 @@ def parse_args(argv=None):
     ap.add_argument("--threshold", "-t", type=float, default=None,
                     help="decision threshold for the printed summary "
                          "(default: the detector's own operating point, or 0.5)")
+    ap.add_argument("--tta", type=int, default=1, metavar="N",
+                    help="test-time augmentation: average N views per image "
+                         "(1 = off; 2 adds a flip; up to 4). Slower, steadier.")
     ap.add_argument("--best-threshold", action="store_true",
                     help="also report the threshold that maximises F1 (labeled only)")
     ap.add_argument("--require-labels", action="store_true",
@@ -117,10 +120,23 @@ def main(argv=None) -> int:
         return 2
 
     runner.QUIET = args.quiet
+
+    def configure(detector):
+        """Set TTA on the loaded backend, if it supports it and was asked for."""
+        if args.tta and args.tta > 1:
+            if hasattr(type(detector), "tta_views"):
+                detector.tta_views = args.tta
+                runner.log(f"test-time augmentation: {args.tta} views/image",
+                           indent=6)
+            else:
+                runner.warn(f"{detector.display_name} does not support TTA - "
+                            "scoring single-view")
+
     try:
         # steps 1-3: scan, load the detector, score
         dataset, result = runner.run_directory(
-            args.directory, args.detector, args.weights, total_steps=TOTAL_STEPS)
+            args.directory, args.detector, args.weights,
+            total_steps=TOTAL_STEPS, configure=configure)
     except SystemExit as exc:
         # the runner raises SystemExit(message) for bad input; report it as a
         # usage error (2) rather than the 1 a bare raise would give
