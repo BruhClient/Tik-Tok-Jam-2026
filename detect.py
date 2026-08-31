@@ -16,15 +16,19 @@ The folder decides what you get back. Both cases always write the JSON:
              --require-labels if you expected labels and want it to fail loudly
              when the subfolders turn out to be misnamed.
 
-Output is the required format:
+Output is the required format, plus two readability fields:
 
     [
-      {"image_path": "C:/data/img_0001.jpg", "pred": 0.8731},
+      {"image_path": "C:/data/img_0001.jpg", "pred": 0.8731,
+       "prediction_score": 0.8731, "prediction": "fake"},
       ...
     ]
 
-`pred` is P(AI-generated) in [0, 1]. Scores are always raw floats - the
-threshold only affects what gets printed, never what gets written.
+`pred` is P(AI-generated) in [0, 1], and `prediction_score` is the same number
+under a self-describing name. Scores are always raw floats - the threshold
+never changes one. `prediction` is the verdict those scores read to at the
+threshold in effect (--threshold, else the model's own operating point), which
+is the one field the threshold does move.
 
 Visualise any of it with:  python gui.py <dir>   or   python gui.py <out.json>
 
@@ -157,7 +161,8 @@ def main(argv=None) -> int:
     # step 4: the deliverable. Written before the summary, so a slow metrics
     # print can never sit between a finished run and the file it produced.
     runner.step(4, TOTAL_STEPS, "writing")
-    n = export_predictions_json(args.out, dataset, result, relative=args.relative)
+    n = export_predictions_json(args.out, dataset, result, relative=args.relative,
+                                threshold=threshold)
     runner.log(f"{n:,} predictions -> {os.path.abspath(args.out)}", indent=6)
     if args.report:
         export_run_report(args.report, dataset, result, threshold)

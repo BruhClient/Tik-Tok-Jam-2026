@@ -6,16 +6,23 @@ Three outputs, one of which is the contract:
   * predictions.csv   the same plus the derived verdict, for a spreadsheet
   * run report        metrics, timing and dataset composition, for the record
 
-predictions.json is the deliverable format required by the problem statement:
+predictions.json carries the deliverable format required by the problem
+statement, plus two readability fields:
 
     [
-      {"image_path": "...", "pred": 0.8731},
+      {"image_path": "...", "pred": 0.8731,
+       "prediction_score": 0.8731, "prediction": "fake"},
       ...
     ]
 
+`pred` is the contract and is never renamed, reordered away or dropped.
+`prediction_score` is the same number under a self-describing name, and
+`prediction` is that score read against a threshold.
+
 One record per input image, in scan order, whatever happened to it. The
-threshold never appears here and never changes a value: it is a reading of the
-scores, not a property of them.
+threshold still never changes a *score*: it is a reading of the scores, not a
+property of them, which is why `pred` and `prediction_score` are identical no
+matter what threshold is passed and only `prediction` moves.
 """
 
 from __future__ import annotations
@@ -37,23 +44,41 @@ def _path_for(item, root: str, relative: bool) -> str:
 
 
 def export_predictions_json(path: str, dataset, run, relative: bool = False,
-                            nan_value: float = 0.5) -> int:
-    """Write the required [{image_path, pred}] file. Returns row count.
+                            nan_value: float = 0.5, threshold: float = None) -> int:
+    """Write the [{image_path, pred, prediction_score, prediction}] file.
+
+    Returns row count.
+
+    `pred` and `prediction_score` hold the same value - the required key and a
+    self-describing alias for it. `prediction` is the verdict at `threshold`:
+    "fake" for a score at or above it, "real" below.
+
+    `threshold` defaults to the detector's own calibrated operating point
+    (`run.threshold`), which is what the CLI and the window both display. It is
+    NOT 0.5 for the shipped bundles, so leaving it out and assuming a midpoint
+    would disagree with every number this project prints.
 
     An image that failed to decode has a NaN score, which is not valid JSON and
-    is not a prediction either. It is written as `nan_value` (0.5 - maximally
-    uncommitted) rather than dropped, so the record count always matches the
-    file count. The failures are named in the terminal summary.
+    is not a prediction either. Its score is written as `nan_value` (0.5 -
+    maximally uncommitted) rather than dropped, so the record count always
+    matches the file count, and its `prediction` is null rather than a verdict:
+    0.5 sits below the operating point, so calling it "real" would silently
+    report a failed decode as an authentic photograph. The failures are named in
+    the terminal summary.
     """
+    thr = run.threshold if threshold is None else float(threshold)
     records = []
     for item, score in zip(dataset.items, run.scores):
-        pred = float(score)
-        if math.isnan(pred):
-            pred = float(nan_value)
+        raw = float(score)
+        failed = math.isnan(raw)
+        pred = float(nan_value) if failed else raw
+        # 6 dp: past float noise, short enough that the file stays readable
+        pred = round(pred, 6)
         records.append({
             "image_path": _path_for(item, dataset.root, relative),
-            # 6 dp: past float noise, short enough that the file stays readable
-            "pred": round(pred, 6),
+            "pred": pred,
+            "prediction_score": pred,
+            "prediction": None if failed else ("fake" if raw >= thr else "real"),
         })
     with open(path, "w", encoding="utf-8") as f:
         json.dump(records, f, indent=2)

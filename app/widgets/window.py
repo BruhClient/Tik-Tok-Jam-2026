@@ -579,7 +579,10 @@ class AppWindow(QMainWindow):
         if not path:
             return
         try:
-            n = EX.export_predictions_json(path, self.dataset, self.result)
+            # the live slider value, so the exported verdicts match what the
+            # window is currently showing rather than the model's default point
+            n = EX.export_predictions_json(path, self.dataset, self.result,
+                                           threshold=self.threshold)
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
             return
