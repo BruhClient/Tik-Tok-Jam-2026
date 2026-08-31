@@ -121,11 +121,25 @@ torch>=2.0     transformers>=4.40
 `transformers` is only used to *build* the CLIP tower — the weights ship inside
 the bundle, so nothing is downloaded at run time.
 
-**The model bundle is gitignored** (`models/*`, ~1.2 GB each) and is not in a ###CHECK ON THIS
-fresh clone. Put it at `models/bundle.pt` before running anything:
+**The model bundle is not in the repository.** At ~1.2 GB it is far past
+GitHub's 100 MB per-file limit, and past the 1 GB of LFS storage a free account
+gets, so it ships as a **GitHub Release asset** instead — no quota, no bandwidth
+billing, and clones stay small. `models/*` is gitignored for that reason.
+
+Download `bundle.pt` from the repository's
+[Releases page](https://github.com/BruhClient/Tik-Tok-Jam-2026/releases) and put
+it at `models/bundle.pt`:
+
+```
+models/
+└── bundle.pt        # ~1.2 GB, from the latest release
+```
+
+Then confirm it is picked up — a backend with no `[no checkpoint …]` tag is
+ready to run:
 
 ```bash
-python detect.py --list-detectors     # shows which backends can currently run
+python detect.py --list-detectors
 ```
 
 **Training additionally needs** (installed by `training_process/run_all.py`, or
@@ -1002,9 +1016,10 @@ error: CLIP ViT-L/14 + MLP head needs a checkpoint, and none is at
 
 This is expected, not a bug. The bundle is ~1.2 GB, and `.gitignore` excludes it
 (`models/*`, with only `models/.gitkeep` tracked), so a clone gets an empty
-`models/` directory — the weights travel separately from the code. Copy the
-bundle to `models/bundle.pt`, or leave it wherever it lives and point at it:
-`python detect.py <dir> --weights D:/somewhere/bundle.pt`.
+`models/` directory — the weights ship as a
+[Release asset](https://github.com/BruhClient/Tik-Tok-Jam-2026/releases), not in
+git. Download it to `models/bundle.pt`, or leave it wherever it lives and point
+at it: `python detect.py <dir> --weights D:/somewhere/bundle.pt`.
 
 The name in the message is the backend's *display* name
 (`CLIP ViT-L/14 + MLP head`), not the value you would pass to `--detector`
