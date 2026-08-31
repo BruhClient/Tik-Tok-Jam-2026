@@ -121,25 +121,11 @@ torch>=2.0     transformers>=4.40
 `transformers` is only used to *build* the CLIP tower — the weights ship inside
 the bundle, so nothing is downloaded at run time.
 
-**The model bundle is not in the repository.** At ~1.2 GB it is far past
-GitHub's 100 MB per-file limit, and past the 1 GB of LFS storage a free account
-gets, so it ships as a **GitHub Release asset** instead — no quota, no bandwidth
-billing, and clones stay small. `models/*` is gitignored for that reason.
-
-Download `bundle.pt` from the repository's
-[Releases page](https://github.com/BruhClient/Tik-Tok-Jam-2026/releases) and put
-it at `models/bundle.pt`:
-
-```
-models/
-└── bundle.pt        # ~1.2 GB, from the latest release
-```
-
-Then confirm it is picked up — a backend with no `[no checkpoint …]` tag is
-ready to run:
+**The model bundle is gitignored** (`models/*`, ~1.2 GB each) and is not in a ###CHECK ON THIS
+fresh clone. Put it at `models/bundle.pt` before running anything:
 
 ```bash
-python detect.py --list-detectors
+python detect.py --list-detectors     # shows which backends can currently run
 ```
 
 **Training additionally needs** (installed by `training_process/run_all.py`, or
@@ -703,7 +689,7 @@ makes the file readable on its own:
 | field | what it is |
 | --- | --- |
 | `image_path` | absolute by default; relative to the input directory with `--relative` |
-| `pred` | — P(AI-generated) in `[0, 1]`, rounded to 6 decimals |
+| `pred` |  — P(AI-generated) in `[0, 1]`, rounded to 6 decimals |
 | `prediction` | `"fake"` if the score is at or above the threshold, `"real"` below |
 
 Every input image gets exactly one record, in sorted path order. An image that
@@ -870,7 +856,7 @@ what keeps the CLI free of any Qt dependency — `detect.py`, `robustness.py` an
 
 ### Data folders
 
-Both are gitignored — they are rebuilt, not cloned.
+Both are gitignored — they are rebuilt, not cloned. 
 
 ```
 sample_data/               the folder the GUI offers by default: real/ + ai/
@@ -1003,35 +989,10 @@ than pretending it works.
 
 ## Troubleshooting
 
-**The very first run after a clone fails at step 2/5.**
-
-```
-[2/5] loading detector
-      CLIP ViT-L/14 + MLP head
-      weights ...\models\bundle.pt
-error: CLIP ViT-L/14 + MLP head needs a checkpoint, and none is at
-       ...\models\bundle.pt
-       put one there, pass --weights <file>, or pick another backend with --detector.
-```
-
-This is expected, not a bug. The bundle is ~1.2 GB, and `.gitignore` excludes it
-(`models/*`, with only `models/.gitkeep` tracked), so a clone gets an empty
-`models/` directory — the weights ship as a
-[Release asset](https://github.com/BruhClient/Tik-Tok-Jam-2026/releases), not in
-git. Download it to `models/bundle.pt`, or leave it wherever it lives and point
-at it: `python detect.py <dir> --weights D:/somewhere/bundle.pt`.
-
-The name in the message is the backend's *display* name
-(`CLIP ViT-L/14 + MLP head`), not the value you would pass to `--detector`
-(`clip_head`). `python detect.py --list-detectors` prints both, and tags every
-backend that has no usable checkpoint:
-
-```
-clip_head    CLIP ViT-L/14 + MLP head
-ensemble     CLIP tower + head ensemble  [no checkpoint at ]
-trained      Trained model               [no checkpoint at models\model.pt]
-default: clip_head
-```
+**`error: <detector> needs a checkpoint, and none is at .../models/bundle.pt`**
+The bundle is gitignored and is not in a clone. Put it at `models/bundle.pt`, or
+pass `--weights <file>`. `python detect.py --list-detectors` shows which backends
+can currently run.
 
 **Everything scores as AI, or everything scores as real.** Check the threshold.
 The calibrated operating point is not `0.5` — it is whatever the bundle carries
