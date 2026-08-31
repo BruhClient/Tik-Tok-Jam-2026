@@ -10,14 +10,74 @@ pipeline behind a window. All three call into `app/`, so a number you read in
 the window is the number the CLI printed.
 
 There is **no training step in this repository**. The model is trained
-elsewhere (see [Model provenance](#model-provenance)); this scores images with
+in `training_process/` (see [Model provenance](#model-provenance)); this scores images with
 it and tells you how far you can trust the answer.
+
+---
+
+## About this project
+
+### How our solution addresses the problem
+
+Our model trains specifically on **augmented images** so it is not fooled by
+post-processing. We apply JPEG recompression, Gaussian blur, downscaling,
+noise, social-repost chains and more during training — the model is penalised
+on the worst-case augmented view via a CVaR objective, making it robust to the
+exact things that happen to an image on its way to your screen.
+
+We use **CLIP ViT-L/14** as a frozen feature extractor. Before embedding, every
+image is re-encoded as JPEG at a fixed quality — this neutralises format-based
+shortcuts (real photos tend to arrive as JPEG, generated ones as PNG) and brings
+both classes to the same distribution. Only a small MLP head is trained on top
+of these features, which means the tower's generalist representations carry the
+weight and the head adapts to the detection task.
+
+Because of limited time and datasets, we report **AUC** as our primary metric
+rather than accuracy. The optimal decision threshold shifts between different
+evaluated image sets, so a fixed accuracy figure is misleading. AUC measures
+the model's discriminative power independently of any threshold choice.
+Accuracy becomes meaningful once a threshold is fixed for a specific deployment
+context — `--best-threshold` shows where F1 peaks on any labeled folder.
+
+### Development tools
+
+- Visual Studio Code
+
+### Models and APIs
+
+- **CLIP ViT-L/14** (`openai/clip-vit-large-patch14`) — frozen vision tower,
+  redistributed inside `bundle.pt`
+
+### Libraries and frameworks
+
+| library | role |
+| --- | --- |
+| PyTorch | model training and inference |
+| Hugging Face Transformers | CLIP model loading (`CLIPVisionModelWithProjection`) |
+| Hugging Face Datasets | downloading training datasets from HuggingFace Hub |
+| Pillow | image loading, JPEG re-encoding, augmentation ops |
+| scikit-learn | AUC, average precision, calibration metrics |
+| NumPy | numerical operations throughout |
+| PyQt6 | desktop GUI |
+| matplotlib | score histograms, ROC, PR, confusion matrix, degradation curves |
+
+### Datasets and assets
+
+| dataset | source | used for |
+| --- | --- | --- |
+| SID_Set | `saberzl/SID_Set` (HuggingFace) | primary training data — real OpenImages photos vs fully synthetic images |
+| MS COCOAI / Defactify | `Rajarshi-Roy-research/Defactify_Image_Dataset` (HuggingFace) | semantically-aligned real/fake pairs across SD3, SDXL, DALL·E 3, MidJourney |
+| Kaggle AI vs Human | Kaggle | additional real/AI pairs |
+| MS COCO (val2017) | `http://images.cocodataset.org` | held-out real benchmark, never seen during training |
+| Unsplash Lite | [unsplash.com/data](https://unsplash.com/data) | extra real photos to broaden the real distribution |
 
 ---
 
 ## Contents
 
+- [About this project](#about-this-project)
 - [Quick start](#quick-start)
+- [Downloading the model](#downloading-the-model)
 - [Commands](#commands)
 - [Model provenance](#model-provenance)
 - [The model](#the-model)
@@ -37,8 +97,11 @@ it and tells you how far you can trust the answer.
 ```bash
 pip install -r requirements.txt
 
-# put the trained bundle here (see "Model provenance")
-#   models/bundle.pt
+# Download the trained model (see "Downloading the model" below)
+gh release download Model_for_tiktokTechJam2026 \
+    --repo BruhClient/Tik-Tok-Jam-2026 \
+    --pattern bundle.pt \
+    --dir models/
 
 python detect.py sample_data                 # -> predictions.json + metrics
 python robustness.py sample_data             # -> robustness_report.json
@@ -120,14 +183,34 @@ python gui.py predictions.json    # open a finished result file
 
 ---
 
+## Downloading the model
+
+The trained bundle (`bundle.pt`, ~1.1 GB) is distributed as a GitHub Release
+asset — it is too large to store in the repository.
+
+**Option 1 — GitHub CLI (recommended):**
+```bash
+gh release download Model_for_tiktokTechJam2026 \
+    --repo BruhClient/Tik-Tok-Jam-2026 \
+    --pattern bundle.pt \
+    --dir models/
+```
+
+**Option 2 — direct browser download:**
+Go to the [Releases page](https://github.com/BruhClient/Tik-Tok-Jam-2026/releases/tag/Model_for_tiktokTechJam2026)
+and download `bundle.pt`, then place it at `models/bundle.pt`.
+
+Once it is there, `detect.py`, `robustness.py` and `gui.py` will all pick it
+up automatically with no further configuration.
+
+---
+
 ## Model provenance
 
 The detector shipped here is **not trained in this repository**. The training
 pipeline — feature extraction (`clipfeat.py`), the augmentation stack
 (`augment.py`), the CVaR head objective and the calibration fit — lives in
-Joe's upstream repository, and this project consumes its output.
-
-> **Upstream training repository:** _add the link to Joe's repo here_
+`training_process/`, and this inference repo consumes its output.
 
 What crosses the boundary is a single file: `models/bundle.pt`. Everything the
 detector needs travels inside it (tower config and weights, head config and
