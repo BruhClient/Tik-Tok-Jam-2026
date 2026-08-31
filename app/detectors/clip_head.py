@@ -121,6 +121,19 @@ def _head_class(torch):
     return Head
 
 
+def _center_zoom(img: Image.Image, keep: float) -> Image.Image:
+    """Crop the central `keep` fraction - a slight zoom used as a TTA view.
+
+    _to_clip_array resizes back to 224 afterwards, so this reframes the image
+    rather than shrinking it: the detector sees the same subject a little
+    closer, which is a fair second opinion, not an added degradation.
+    """
+    w, h = img.size
+    nw, nh = max(1, int(w * keep)), max(1, int(h * keep))
+    left, top = (w - nw) // 2, (h - nh) // 2
+    return img.crop((left, top, left + nw, top + nh))
+
+
 @register
 class ClipHeadDetector(Detector):
     name = "clip_head"                          # --detector clip_head
@@ -136,6 +149,16 @@ class ClipHeadDetector(Detector):
     # CLIP ViT-L/14 is ~300M params. 16 keeps CPU memory sane and the progress
     # bar moving; a GPU is nowhere near saturated, but it is not the bottleneck.
     batch_size = 16
+
+    # Test-time augmentation: score N views of each image and average the
+    # calibrated probabilities. 1 = off, and off is the default so the deployed
+    # numbers stay deterministic and unchanged. 2 adds a horizontal flip (the
+    # classic, always-safe view); 3-4 add a mild centre zoom and its flip.
+    # Averaging smooths the per-image variance that post-processing introduces,
+    # which is where a robustness sweep tends to show the gain - at N x the cost.
+    tta_views = 1
+    #: the views TTA can draw on, in priority order; tta_views takes the first N
+    MAX_TTA_VIEWS = 4
 
     def __init__(self):
         super().__init__()
@@ -271,27 +294,69 @@ class ClipHeadDetector(Detector):
         return scores
 
     def predict_images(self, images: list) -> list:
-        """Score decoded PIL images. The robustness sweep calls this directly."""
+        """Score decoded PIL images. The robustness sweep calls this directly.
+
+        With tta_views == 1 (the default) this is one calibrated probability per
+        image. Above that, each image is scored under several views and the
+        probabilities are averaged - see _tta_view_fns for the views.
+        """
         if not images:
             return []
         self.ensure_loaded()
+
+        views = self._tta_view_fns()
+        # one CLIP array per (image, view), grouped by image so the flat result
+        # reshapes to (n_images, n_views) and averages back per image
+        arrays = [self._to_clip_array(view(img))
+                  for img in images for view in views]
+        probs = self._calibrated_probs(arrays)                # len = n_img * n_view
+
+        v = len(views)
+        averaged = [sum(probs[i * v:(i + 1) * v]) / v for i in range(len(images))]
+        return [round(float(p), 6) for p in averaged]
+
+    def _tta_view_fns(self) -> list:
+        """The view functions TTA averages over, `tta_views` of them.
+
+        Identity is always first, so tta_views == 1 reproduces the plain,
+        deterministic scoring exactly. The flip is the standard safe view; the
+        zoom reframes by dropping a 10% border, which _to_clip_array then scales
+        back to 224 - a legitimate second look, not a new degradation.
+        """
+        n = max(1, min(int(getattr(self, "tta_views", 1)), self.MAX_TTA_VIEWS))
+        flip = Image.Transpose.FLIP_LEFT_RIGHT
+        views = [
+            lambda im: im,                                     # identity
+            lambda im: im.transpose(flip),                    # horizontal flip
+            lambda im: _center_zoom(im, 0.9),                 # mild zoom
+            lambda im: _center_zoom(im, 0.9).transpose(flip),  # zoom + flip
+        ]
+        return views[:n]
+
+    def _calibrated_probs(self, arrays: list) -> list:
+        """Tower -> head -> Platt for a list of CLIP arrays, as plain floats.
+
+        Forwards in chunks of batch_size so TTA (which multiplies the array
+        count by the number of views) cannot blow up peak memory on CPU.
+        """
         torch = self._torch
-
-        batch = torch.from_numpy(
-            np.stack([self._to_clip_array(img) for img in images])).to(self.device)
-
-        # no_grad: nothing here is trained, and the graph would cost memory
-        with torch.no_grad():
-            feats = self._embed(batch)
-            if self.l2:                       # 1e-8 guards a zero-norm feature
-                feats = feats / (feats.norm(dim=-1, keepdim=True) + 1e-8)
-            # exactly the training order: L2-normalise, then standardise.
-            # Swapping the two changes every feature the head sees.
-            feats = (feats - self.mu) / self.sd
-            logits = self.head(feats)             # (B,), the head squeezes
-            probs = torch.sigmoid(self.platt_a * logits + self.platt_b)
-
-        return [round(float(p), 6) for p in probs.float().cpu()]
+        bs = max(1, int(self.batch_size))
+        out = []
+        for start in range(0, len(arrays), bs):
+            chunk = np.stack(arrays[start:start + bs])
+            batch = torch.from_numpy(chunk).to(self.device)
+            # no_grad: nothing here is trained, and the graph would cost memory
+            with torch.no_grad():
+                feats = self._embed(batch)
+                if self.l2:                   # 1e-8 guards a zero-norm feature
+                    feats = feats / (feats.norm(dim=-1, keepdim=True) + 1e-8)
+                # exactly the training order: L2-normalise, then standardise.
+                # Swapping the two changes every feature the head sees.
+                feats = (feats - self.mu) / self.sd
+                logits = self.head(feats)         # (B,), the head squeezes
+                probs = torch.sigmoid(self.platt_a * logits + self.platt_b)
+            out.extend(float(p) for p in probs.float().cpu())
+        return out
 
     def _embed(self, batch):
         """Tower forward, honouring whichever feature the head was trained on."""

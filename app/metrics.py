@@ -213,6 +213,35 @@ def best_threshold(y_true, scores, criterion: str = "f1") -> float:
     return best_t
 
 
+def threshold_for_fpr(y_true, scores, target_fpr: float = 0.01) -> float:
+    """Lowest threshold whose FPR on authentic images stays within `target_fpr`.
+
+    This is the operating point that matters for this problem: calling a real
+    photo fake is the expensive error, so the shipped threshold is chosen for a
+    false-positive budget (1% by default), not for accuracy. Raising the
+    threshold only ever lowers both FPR and recall together, so the *lowest*
+    threshold that already meets the budget is the best trade - it buys the most
+    recall the budget allows.
+
+    Returns a threshold just above the highest score (so nothing is flagged)
+    when even that cannot be met, which only happens on data with no separation.
+    """
+    y = np.asarray(y_true, dtype=int)
+    s = np.asarray(scores, dtype=float)
+    if not _both_classes(y):
+        return 0.5
+
+    # candidate thresholds are the observed scores (only those change the
+    # confusion matrix), scanned low -> high. FPR is monotonic non-increasing in
+    # the threshold, so the first candidate meeting the budget is the smallest.
+    for t in np.unique(s):
+        if compute_metrics(y, s, float(t)).fpr <= target_fpr:
+            return float(t)
+    # unreachable in practice: at any t above every score, nothing is flagged
+    # and FPR is 0 - but be explicit rather than fall through to None
+    return float(np.nextafter(s.max(), np.inf))
+
+
 def threshold_sweep(y_true, scores, n: int = 101):
     """Accuracy / F1 / FPR across thresholds, for the threshold explorer chart.
 
