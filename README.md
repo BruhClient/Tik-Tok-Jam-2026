@@ -973,10 +973,34 @@ than pretending it works.
 
 ## Troubleshooting
 
-**`error: <detector> needs a checkpoint, and none is at .../models/bundle.pt`**
-The bundle is gitignored and is not in a clone. Put it at `models/bundle.pt`, or
-pass `--weights <file>`. `python detect.py --list-detectors` shows which backends
-can currently run.
+**The very first run after a clone fails at step 2/5.**
+
+```
+[2/5] loading detector
+      CLIP ViT-L/14 + MLP head
+      weights ...\models\bundle.pt
+error: CLIP ViT-L/14 + MLP head needs a checkpoint, and none is at
+       ...\models\bundle.pt
+       put one there, pass --weights <file>, or pick another backend with --detector.
+```
+
+This is expected, not a bug. The bundle is ~1.2 GB, and `.gitignore` excludes it
+(`models/*`, with only `models/.gitkeep` tracked), so a clone gets an empty
+`models/` directory — the weights travel separately from the code. Copy the
+bundle to `models/bundle.pt`, or leave it wherever it lives and point at it:
+`python detect.py <dir> --weights D:/somewhere/bundle.pt`.
+
+The name in the message is the backend's *display* name
+(`CLIP ViT-L/14 + MLP head`), not the value you would pass to `--detector`
+(`clip_head`). `python detect.py --list-detectors` prints both, and tags every
+backend that has no usable checkpoint:
+
+```
+clip_head    CLIP ViT-L/14 + MLP head
+ensemble     CLIP tower + head ensemble  [no checkpoint at ]
+trained      Trained model               [no checkpoint at models\model.pt]
+default: clip_head
+```
 
 **Everything scores as AI, or everything scores as real.** Check the threshold.
 The calibrated operating point is not `0.5` — it is whatever the bundle carries
