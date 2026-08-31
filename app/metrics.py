@@ -2,7 +2,14 @@
 
 Label convention: 1 = AI-generated (positive class), 0 = authentic.
 A false positive is therefore an authentic image flagged as AI, which is the
-error mode that matters most for this problem statement.
+error mode that matters most for this problem statement - the shipped operating
+point is chosen to hold it near 1%.
+
+Everything here is a pure function of (y_true, scores, threshold), with no
+dataset or detector types involved, so the CLI, the GUI and the sweep all get
+identical numbers from the same code. sklearn is used when present and each
+function carries a numpy fallback, so metrics never become the reason a run
+cannot start.
 """
 
 from __future__ import annotations
@@ -21,6 +28,13 @@ except Exception:  # pragma: no cover - sklearn is in requirements
 
 @dataclass
 class Metrics:
+    """One evaluation at one threshold. NaN means "not defined on this data".
+
+    NaN rather than 0 throughout: a precision with no positive predictions is
+    undefined, not zero, and fmt() renders it as an em dash so the UI says so
+    instead of showing a number nobody should read.
+    """
+
     n: int = 0
     n_real: int = 0
     n_ai: int = 0
@@ -42,13 +56,16 @@ class Metrics:
 
     @property
     def valid(self) -> bool:
+        """False for an empty evaluation - nothing was labeled and scored."""
         return self.n > 0
 
     def as_dict(self) -> dict:
+        """Flat dict for the JSON reports."""
         return asdict(self)
 
 
 def _safe_div(a: float, b: float) -> float:
+    """a / b, or NaN when the denominator is empty (undefined, not zero)."""
     return float(a) / float(b) if b else float("nan")
 
 
@@ -59,6 +76,8 @@ def compute_metrics(y_true, scores, threshold: float = 0.5) -> Metrics:
     if y.size == 0:
         return Metrics(threshold=threshold)
 
+    # >= not >: an image sitting exactly on the threshold is called AI, which
+    # matches how the threshold is described everywhere ("AI starts here")
     pred = (s >= threshold).astype(int)
     tp = int(np.sum((pred == 1) & (y == 1)))
     fp = int(np.sum((pred == 1) & (y == 0)))
@@ -68,6 +87,8 @@ def compute_metrics(y_true, scores, threshold: float = 0.5) -> Metrics:
     recall = _safe_div(tp, tp + fn)
     specificity = _safe_div(tn, tn + fp)
     precision = _safe_div(tp, tp + fp)
+    # x == x is a NaN test: F1 is only defined when both parts are, and when
+    # they do not sum to zero
     f1 = _safe_div(2 * precision * recall, precision + recall) if (
         precision == precision and recall == recall and (precision + recall) > 0) else float("nan")
 
@@ -92,18 +113,22 @@ def compute_metrics(y_true, scores, threshold: float = 0.5) -> Metrics:
 
 
 def _both_classes(y) -> bool:
+    """AUC, AP and the curves need at least one of each class to mean anything."""
     y = np.asarray(y)
     return y.size > 0 and 0 < int(np.sum(y == 1)) < y.size
 
 
 def roc_auc(y_true, scores) -> float:
+    """Area under the ROC curve, threshold-free. NaN unless both classes exist."""
     y = np.asarray(y_true, dtype=int)
     s = np.asarray(scores, dtype=float)
     if not _both_classes(y):
         return float("nan")
     if HAVE_SKLEARN:
         return float(_sk_auc(y, s))
-    # rank-based fallback (Mann-Whitney U)
+    # rank-based fallback (Mann-Whitney U): AUC is the probability that a random
+    # AI image outranks a random real one, which is computable from ranks alone.
+    # mergesort is the stable sort, so ties break the same way every run.
     order = np.argsort(s, kind="mergesort")
     ranks = np.empty_like(order, dtype=float)
     ranks[order] = np.arange(1, s.size + 1)
@@ -113,6 +138,8 @@ def roc_auc(y_true, scores) -> float:
 
 
 def average_precision(y_true, scores) -> float:
+    """Area under the precision-recall curve. More honest than AUC when the
+    classes are imbalanced, which a real-world image folder usually is."""
     y = np.asarray(y_true, dtype=int)
     s = np.asarray(scores, dtype=float)
     if not _both_classes(y):
@@ -163,7 +190,12 @@ def pr_points(y_true, scores):
 
 
 def best_threshold(y_true, scores, criterion: str = "f1") -> float:
-    """criterion: 'f1' (max F1) or 'youden' (max TPR-FPR)."""
+    """The threshold that maximises F1 (or Youden's J). Backs the Best F1 button.
+
+    Only the observed scores can change the confusion matrix, so those are the
+    candidates - not an arbitrary grid. Above 400 of them it switches to
+    quantiles, because this is O(candidates x n) and it runs interactively.
+    """
     y = np.asarray(y_true, dtype=int)
     s = np.asarray(scores, dtype=float)
     if not _both_classes(y):
@@ -182,7 +214,11 @@ def best_threshold(y_true, scores, criterion: str = "f1") -> float:
 
 
 def threshold_sweep(y_true, scores, n: int = 101):
-    """Accuracy / F1 / FPR across thresholds, for the threshold explorer chart."""
+    """Accuracy / F1 / FPR across thresholds, for the threshold explorer chart.
+
+    An even grid over [0, 1] here, not the observed scores: this one is drawn as
+    a curve against threshold, so the x axis has to be evenly spaced.
+    """
     ts = np.linspace(0.0, 1.0, n)
     acc, f1, fpr = [], [], []
     for t in ts:

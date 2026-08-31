@@ -20,6 +20,12 @@ gallery, preview. Everything else is greyscale and space.
 
 Every value the stylesheet needs is named here. Nothing below hardcodes a hex,
 so this block is the only thing to edit.
+
+Three consumers, one source: STYLESHEET is applied once to the QApplication,
+individual widgets read the constants for the few things a stylesheet cannot
+express (a painted delegate, a status colour), and apply_matplotlib_style()
+pushes the same palette into rcParams so the charts are part of the window
+rather than a white rectangle inside it.
 """
 
 from __future__ import annotations
@@ -87,20 +93,27 @@ MONO_STACK = '"Cascadia Mono", "Consolas", "SF Mono", monospace'
 
 
 def contrast_text(fill: str) -> str:
-    """Pick text that reads on an arbitrary fill.
+    """Pick text that reads on an arbitrary fill (WCAG relative luminance).
 
     The verdict pills use the real/AI hues at full strength, and those two sit
     on opposite sides of the line - white reads on the red but not on the
     teal. Rather than hardcode one colour per pill, measure the fill.
     """
+    # sRGB -> linear, then the standard luminance weighting. Averaging the raw
+    # channels instead would call the teal dark and put white on it.
     channels = []
     for raw in (int(fill[i:i + 2], 16) / 255 for i in (1, 3, 5)):
         channels.append(raw / 12.92 if raw <= 0.04045
                         else ((raw + 0.055) / 1.055) ** 2.4)
     luminance = 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+    # 0.35, not 0.5: white text needs a darker fill than the midpoint suggests
     return BG if luminance > 0.35 else ON_ACCENT
 
 
+#: The whole application stylesheet, applied once to the QApplication. Widgets
+#: opt into variants with Qt properties rather than one-off setStyleSheet calls:
+#: `accent` (the primary button), `chip`, `tab`, `tile`, `link`, and `bare` for
+#: a container that must not paint its own ground.
 STYLESHEET = f"""
 * {{
     font-family: {FONT_STACK};
@@ -534,7 +547,12 @@ QMessageBox QLabel {{
 
 
 def apply_matplotlib_style() -> None:
-    """Make matplotlib figures blend into the dark UI."""
+    """Make matplotlib figures blend into the dark UI.
+
+    Called once at startup, before any canvas exists. Imported here rather than
+    at module scope so the CLI - which imports theme.py transitively - does not
+    pay for matplotlib.
+    """
     import matplotlib
 
     matplotlib.rcParams.update(
@@ -561,6 +579,8 @@ def apply_matplotlib_style() -> None:
             "legend.fontsize": 8,
             "legend.labelcolor": TEXT_DIM,
             "font.size": 9,
+            # off because every canvas passes layout="constrained" instead,
+            # which is the one that copes with these small panels
             "figure.autolayout": False,
         }
     )

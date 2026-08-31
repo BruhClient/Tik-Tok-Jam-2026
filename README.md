@@ -1,22 +1,57 @@
 # AIGC Image Detector
 
-Detects AI-generated images and reports how well that detection survives
-realistic post-processing.
+Detects AI-generated images, and measures how much of that detection survives
+the things that actually happen to a picture on the way to your screen — JPEG
+recompression, downscaling, blur, a screenshot of a repost.
 
-**The deliverable is `detect.py`** — image directory in, `predictions.json`
-out. `gui.py` is the same pipeline behind a window. Work happens in scripts
-that log to the terminal; the window shows finished results.
+**The deliverable is `detect.py`**: image directory in, `predictions.json` out.
+`robustness.py` is the same model under a transform sweep. `gui.py` is the same
+pipeline behind a window. All three call into `app/`, so a number you read in
+the window is the number the CLI printed.
 
-There is no training step here. The model is trained elsewhere; this scores
-images with it.
+There is **no training step in this repository**. The model is trained
+elsewhere (see [Model provenance](#model-provenance)); this scores images with
+it and tells you how far you can trust the answer.
+
+---
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Commands](#commands)
+- [Model provenance](#model-provenance)
+- [The model](#the-model)
+- [Two kinds of input](#two-kinds-of-input)
+- [Output format](#output-format)
+- [The robustness sweep](#the-robustness-sweep)
+- [The window](#the-window)
+- [Results on the sample set](#results-on-the-sample-set)
+- [Plugging in a different model](#plugging-in-a-different-model)
+- [Repository layout](#repository-layout)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Quick start
+
+```bash
+pip install -r requirements.txt
+
+# put the trained bundle here (see "Model provenance")
+#   models/bundle.pt
+
+python detect.py sample_data                 # -> predictions.json + metrics
+python robustness.py sample_data             # -> robustness_report.json
+python gui.py                                # the window
+```
+
+Requires Python 3.9+. A CUDA GPU is used automatically when torch finds one;
+CPU works and is the assumed case — CLIP ViT-L/14 scores roughly 5–15 images a
+second on a modern laptop CPU.
 
 ---
 
 ## Commands
-
-```bash
-pip install -r requirements.txt
-```
 
 | | command | what you get |
 | --- | --- | --- |
@@ -24,17 +59,159 @@ pip install -r requirements.txt
 | **Robustness** | `python robustness.py <dir>` | transform sweep → `robustness_report.json` (needs labels) |
 | **Window** | `python gui.py [<dir> \| <preds.json>]` | upload, then insights or verdicts |
 
+Everything prints progress to the terminal — in the GUI too. The window shows
+finished results; the one exception is the run itself, which gets a working
+screen, because loading a gigabyte-plus bundle off disk otherwise looks exactly
+like a hang.
+
+### `detect.py`
+
 ```bash
+python detect.py <dir>
 python detect.py <dir> --best-threshold --report run_report.json
-python detect.py <dir> --out results.json --weights models/best.pt
+python detect.py <dir> --out results.json --weights models/bundle_cvar.pt
 python detect.py <dir> --require-labels          # fail if labels are missing
-python robustness.py <dir> --transforms jpeg,blur --severities 1,3,5
 python detect.py --list-detectors
+```
+
+| flag | meaning |
+| --- | --- |
+| `--out, -o` | output JSON path (default `predictions.json`) |
+| `--detector, -d` | registered backend name (default: the best one that has a checkpoint) |
+| `--weights, -w` | checkpoint to load instead of the backend's default |
+| `--threshold, -t` | decision threshold for the **printed** summary (default: the model's own operating point) |
+| `--best-threshold` | also report the threshold that maximises F1 (labeled folders only) |
+| `--require-labels` | exit 2 instead of silently falling back to scores-only |
+| `--relative` | write paths relative to the input directory |
+| `--report` | also write a metrics/timing report to a JSON path |
+| `--quiet, -q` | suppress progress output |
+| `--list-detectors` | print the registered backends and exit |
+
+Exit codes: `0` success, `2` bad input (missing directory, unknown detector,
+missing checkpoint, `--require-labels` with no labels).
+
+### `robustness.py`
+
+```bash
+python robustness.py <dir>
+python robustness.py <dir> --transforms jpeg,blur --severities 1,3,5
+python robustness.py <dir> --sample 400 --max-side 1024
 python robustness.py --list-transforms
 ```
 
-Progress always prints to the terminal — in the GUI too. The window shows
-finished results, never a loading bar.
+| flag | meaning |
+| --- | --- |
+| `--transforms` | comma-separated keys (default `jpeg,blur,rescale,crop,social`) |
+| `--severities` | comma-separated levels 1–5 (default `1,2,3,4,5`) |
+| `--sample` | images per cell, balanced across classes (default 200) |
+| `--max-side` | decode cap in pixels (default 768) |
+| `--detector, -d` / `--weights, -w` | as above |
+| `--threshold, -t` | the **fixed** threshold accuracy is measured at |
+| `--out, -o` | report path (default `<dir>/robustness_report.json`) |
+| `--list-transforms` | print the transform keys and what each severity means |
+
+### `gui.py`
+
+```bash
+python gui.py                     # start empty, pick a folder in the app
+python gui.py <image_directory>   # score that folder on launch
+python gui.py predictions.json    # open a finished result file
+```
+
+---
+
+## Model provenance
+
+The detector shipped here is **not trained in this repository**. The training
+pipeline — feature extraction (`clipfeat.py`), the augmentation stack
+(`augment.py`), the CVaR head objective and the calibration fit — lives in
+Joe's upstream repository, and this project consumes its output.
+
+> **Upstream training repository:** _add the link to Joe's repo here_
+
+What crosses the boundary is a single file: `models/bundle.pt`. Everything the
+detector needs travels inside it (tower config and weights, head config and
+weights, feature standardisation, Platt coefficients, operating point), which
+is what lets this repo run with **no network access at inference time** and no
+config that can drift out of sync with the weights.
+
+Several constants in `app/detectors/clip_head.py` are pinned to that training
+pipeline and must not be "cleaned up" independently of it — each one is
+commented at the site with what it mirrors upstream:
+
+| constant / step | mirrors upstream |
+| --- | --- |
+| `SOURCE_JPEG_Q = 92` | `augment.normalise_source` re-encoded **every** image before it was ever seen |
+| `subsampling=2` on that re-encode | `augment.op_jpeg` used 4:2:0 chroma subsampling |
+| `RES = 224`, bicubic, centre crop | `clipfeat.py` preprocessing |
+| `CLIP_MEAN` / `CLIP_STD` | CLIP's constants, **not** ImageNet's |
+| `MAX_PIXELS`, `Image.MAX_IMAGE_PIXELS = None` | the same decode cap the training loader used |
+| `Head.net` layer indices | the checkpoint keys are `net.0/1/4/5/8`, so the ReLU and Dropout must stay in place even though they hold no weights |
+
+Two bundles are present, and they are **not** the same model — each carries its
+own calibration and its own operating point, read straight out of the file at
+load time and printed in the run log:
+
+| bundle | operating point | notes |
+| --- | --- | --- |
+| `models/bundle.pt` | `0.780` | the default — whatever sits at this path wins |
+| `models/bundle_cvar.pt` | `0.954` | the CVaR/1%-FPR calibration the figures below were measured on |
+
+Point at either with `--weights models/bundle_cvar.pt`. Never hardcode an
+operating point from this table into anything: read it from the bundle, which is
+what the app does.
+
+---
+
+## The model
+
+`app/detectors/clip_head.py` is the real backend: a **frozen CLIP ViT-L/14**
+vision tower plus a **small MLP head** trained on top of its embeddings. Only
+the head was trained — the tower is stock `openai/clip-vit-large-patch14`,
+loaded from the bundle rather than downloaded.
+
+Put the bundle at `models/bundle.pt` and it becomes the default backend
+everywhere — CLI, GUI and sweep — with nothing to flip. Point elsewhere with
+`--weights <file>`.
+
+Scoring reproduces the training pipeline exactly, in this order:
+
+```
+JPEG re-encode at q92, 4:2:0                      <- not an optimisation; see below
+shortest side -> 224 (bicubic), centre crop 224
+CLIP normalisation (not ImageNet — the constants differ)
+tower -> pooler_output -> visual_projection       768-d
+L2-normalise -> (x - mu) / sd
+head -> logit -> sigmoid(platt_a * logit + platt_b)
+```
+
+**Why the JPEG re-encode is first.** Training re-encoded every image, of both
+classes, before the model ever saw it — otherwise the head learns "real photos
+arrive as JPEG, generated ones arrive as PNG" instead of learning the task.
+`mu`, `sd`, the Platt coefficients and the threshold were therefore all fitted
+on re-encoded features. A pristine PNG scored without that step is
+off-distribution. The midpoint quality (92) is used rather than a random draw
+in 85–98, so inference is deterministic.
+
+**The threshold is not 0.5.** Training used `pos_weight` and a CVaR objective,
+both of which distort the output scale, so the head's raw logits sit high. The
+Platt coefficients — fitted on pooled augmented validation scores — make the
+output readable as a probability, and the bundle carries the operating point it
+was calibrated for (`0.954` for `bundle_cvar.pt`, chosen for **1% FPR on real
+images**; `0.780` for `bundle.pt`). `detect.py` and the window both read it out
+of the file and adopt it automatically — the run log prints it as
+`operating point 0.780` — **Reset** on the slider goes back to it, and
+`--threshold` overrides it. **The JSON is always raw scores either way** — the
+threshold only ever changes what gets *printed* or *drawn*.
+
+**What the architecture can and cannot see.** CLIP resizes to 224 before the
+patch embedding, which is why these features survive JPEG and blur so well and
+why they cannot see subtle resampling traces. The flip side shows up in the
+sweep: heavy compression shifts *both* classes' scores upward, so a fixed
+threshold drifts even where AUROC holds. Read the Robustness page with that in
+mind.
+
+---
 
 ## Two kinds of input
 
@@ -62,11 +239,19 @@ loudly when the subfolders turn out to be misnamed.
 Labels are auto-detected in this order, so the `real/` + `ai/` layout is a
 convention, not a requirement:
 
-1. **Subfolder** — `real/` vs `ai/` (also `authentic`, `natural`, `human`, `0` /
-   `aigc`, `fake`, `generated`, `synthetic`, `1`), at any depth.
-2. **Manifest** — `labels.csv` / `labels.json` in the root, with a path column
-   (`image_path`, `path`, `file`, …) and a label column (`label`, `is_ai`, …).
+1. **Subfolder** — `real/` vs `ai/` (also `authentic`, `natural`, `human`,
+   `camera`, `genuine`, `0` / `aigc`, `fake`, `generated`, `synthetic`, `sd`,
+   `midjourney`, `1`), matched at any depth, nearest folder wins.
+2. **Manifest** — `labels.csv` / `labels.json` (also `manifest.*`,
+   `ground_truth.csv`) in the root, with a path column (`image_path`, `path`,
+   `file`, …) and a label column (`label`, `is_ai`, `y`, `target`, …). Paths
+   resolve absolute, relative-to-manifest, or by basename.
 3. **Filename prefix** — `real_*.jpg`, `ai_*.png`.
+
+Anything that yields no label stays unlabeled and is still scored; a folder can
+be partly labeled, and the metrics simply use the part that is.
+
+---
 
 ## Output format
 
@@ -79,55 +264,104 @@ convention, not a requirement:
 ]
 ```
 
-`pred` is P(AI-generated) in `[0, 1]`. Scores are always raw floats — the
-threshold only affects what gets *printed*, never what gets written.
+`pred` is P(AI-generated) in `[0, 1]`, rounded to 6 decimals. Every input image
+gets exactly one record, in sorted path order. An image that cannot be decoded
+is still emitted — as `0.5`, the maximally uncommitted score — and is counted
+and named in the terminal summary rather than silently dropped, so the record
+count always matches the file count.
 
-## The model
+`--report` additionally writes a run report: dataset composition, label source,
+detector, timing, and the full metrics block at the chosen threshold.
 
-`app/detectors/clip_head.py` is the real backend: a **frozen CLIP ViT-L/14**
-vision tower plus a **small MLP head** trained on top of its embeddings. Only
-the head was trained — the tower is stock `openai/clip-vit-large-patch14`.
+---
 
-Put the bundle at `models/bundle.pt` and it becomes the default backend
-everywhere — CLI, GUI and sweep — with nothing to flip. Point elsewhere with
-`--weights <file>`.
+## The robustness sweep
 
-Everything the model needs travels in that one file, so nothing is downloaded
-at run time: the tower's config and weights, the head's config and weights, the
-feature standardisation (`mu`/`sd`), the Platt coefficients and the operating
-point. Scoring reproduces the training pipeline exactly:
+`robustness.py` answers the question the accuracy number alone cannot: *does
+this still work after the image has been through the internet?*
 
+Each selected transform is applied **in memory** at five severities, the sample
+is re-scored, and every cell is compared against a clean baseline measured
+through the same pipeline. The sample is balanced across classes and seeded, so
+two runs on the same folder are comparable.
+
+| key | transform | severities 1 → 5 |
+| --- | --- | --- |
+| `jpeg` | JPEG recompression | q90 → q30 |
+| `webp` | WebP recompression | q90 → q40 |
+| `blur` | Gaussian blur | σ0.5 → σ3.0 |
+| `rescale` | Downscale → upscale | 75% → 15% |
+| `crop` | Center crop | keep 95% → keep 50% |
+| `bright` | Brightness / contrast | ±5% → ±40% |
+| `saturation` | Saturation shift | +15% → +100% |
+| `noise` | Gaussian noise | σ2 → σ20 |
+| `social` | Social repost combo (downscale + sharpen + JPEG) | pass 1 → pass 5 |
+| `screenshot` | Screenshot resample (odd ratio + blur + re-encode) | level 1 → level 5 |
+
+Ordering matters and is deliberate: the detector's own `prepare_source()` runs
+**before** the sweep's transform, because training conditioned the source first
+and degraded second. Reversing them measures a pipeline the model was never
+trained under.
+
+The report lands at `<dir>/robustness_report.json`, and `gui.py` picks up a
+report sitting next to the data automatically.
+
+---
+
+## The window
+
+Two screens.
+
+**Screen 1 — upload.** You say what you are uploading, a **labeled dataset** or
+**just images**, then pick the folder. A background scan reports what is
+actually in it and refuses to run a labeled job on a folder with no labels.
+Choosing *just images* ignores any labels that are there, so what you asked for
+is what you get.
+
+**Screen 2 — results.** Where it goes follows from that choice:
+
+| you uploaded | you get |
+| --- | --- |
+| a labeled dataset | **Insights** — metric cards, score distribution, ROC and the confusion matrix — with **Images** (every prediction, filtered by all / FP / FN / AI / real, with a preview pane) and **Robustness** (transform picker, severity scale, degradation curve and cell table) behind header tabs |
+| just images | one verdict grid: every image badged AI or authentic, filterable, with no metrics — there is no truth to measure against |
+
+The threshold slider sits in the header and re-reads every view live. **Best
+F1** jumps to the F1-optimal threshold; **Reset** goes back to the model's own
+operating point. **Export JSON** writes the same `predictions.json` the CLI
+writes.
+
+---
+
+## Results on the sample set
+
+Measured with **`models/bundle_cvar.pt`** on `sample_data/` (100 real, 100 AI,
+clean):
+
+| | |
+| --- | --- |
+| AUC | **0.921** |
+| accuracy at that bundle's own threshold (`0.954`) | **86.0%** |
+| recall (AI images caught) | **78%** |
+| FPR (authentic images wrongly flagged) | **6%** |
+| best-F1 threshold | `0.946` → **87.5%** accuracy |
+
+That operating point trades about a point and a half of accuracy for the low
+false-accusation rate it was calibrated for — which is the right trade for this
+job. Calling a real photograph fake is the expensive error.
+
+`models/bundle.pt`, the current default, is a later model and has not been
+re-measured on this table. Reproduce it for whichever bundle you are shipping:
+
+```bash
+python detect.py sample_data --best-threshold --report run_report.json
+python detect.py sample_data --weights models/bundle_cvar.pt --best-threshold
 ```
-shortest side -> 224 (bicubic), centre crop 224
-CLIP normalisation (not ImageNet — the constants differ)
-tower -> pooler_output -> visual_projection            768-d
-L2-normalise -> (x - mu) / sd
-head -> logit -> sigmoid(platt_a * logit + platt_b)
-```
 
-**The threshold is not 0.5.** Training used `pos_weight` and a CVaR objective,
-both of which distort the output scale, so the head's raw logits sit high. The
-Platt coefficients fitted on pooled augmented validation scores make the output
-readable as a probability, and the bundle carries the operating point that was
-chosen for **1% FPR on real images** — about `0.954`. `detect.py` and the
-window both adopt it automatically; **Reset** on the slider goes back to it,
-and `--threshold` overrides it. The JSON is always raw scores either way.
-
-On `sample_data/` (100 real, 100 AI, clean): **AUC 0.921**, and at the bundle's
-own threshold **86.0% accuracy, 78% recall, 6% FPR**. `--best-threshold` finds
-87.5% at `0.946`, so the shipped operating point is trading a little accuracy
-for the low false-accusation rate it was calibrated for — which is the right
-trade for this job.
-
-CLIP resizes to 224 before the patch embedding, which is why these features
-survive JPEG and blur so well and why they cannot see subtle resampling traces.
-The flip side shows up in the sweep: heavy compression shifts *both* classes'
-scores upward, so a fixed threshold drifts even where AUROC holds. Read the
-Robustness page with that in mind.
+---
 
 ## Plugging in a different model
 
-Save it as TorchScript and drop it at `models/model.pt`:
+**The easy path.** Save it as TorchScript and drop it at `models/model.pt`:
 
 ```python
 torch.jit.save(torch.jit.script(model), "models/model.pt")
@@ -135,70 +369,61 @@ torch.jit.save(torch.jit.script(model), "models/model.pt")
 
 `app/detectors/trained.py` picks it up. It ranks below `clip_head` while the
 bundle is present; pick it explicitly with `--detector trained`, or the
-**Weights** field on the Run page.
+**Weights** field on the upload screen.
 
 Check the constants at the top of `trained.py` against how the model was
 actually trained: `INPUT_SIZE`, `MEAN`/`STD`, and `AI_CLASS_INDEX`. It handles
 a 1-logit sigmoid head and a 2-logit softmax head automatically.
 
-Other checkpoint shapes:
-
-| shape | works? |
+| checkpoint shape | works? |
 | --- | --- |
 | TorchScript | yes — architecture travels with the weights |
 | pickled `nn.Module` | yes, if the defining class is importable here |
 | bare `state_dict` | fill in `build_model()` — a tensor dict alone doesn't say what to build |
 
-For a model that needs its own preprocessing, add a detector instead — see
-`app/detectors/base.py`. Any class with `@register` shows up in the picker
-automatically. Override `predict_images()` so the robustness sweep can score
-transformed images in memory instead of round-tripping through temp files.
+**The full path.** For a model that needs its own preprocessing, add a detector
+— see `app/detectors/base.py`:
 
-## What each piece does
+```python
+from .base import Detector, register
 
-**`detect.py`** — the deliverable. Scans recursively, skips non-images,
-survives undecodable files (they become `0.5` and are counted), writes the
-JSON, and adds the metrics block when labels exist.
+@register
+class MyModel(Detector):
+    name = "my_model"
+    display_name = "EfficientNet-B0 + FFT head"
+    description = "Trained on ..."
+    requires_weights = True
+    default_weights = "models/my_model.pt"
 
-**`robustness.py`** — applies transforms in memory at five severities each
-(JPEG, WebP, blur, downscale→upscale, crop, brightness/contrast, saturation,
-noise, social-repost combo, screenshot resample), re-scores the sample, and
-compares against a clean baseline measured through the same pipeline.
+    def load(self):
+        self.model = ...                      # called once, lazily, off the GUI thread
 
-**`gui.py`** — two screens. On the first you say what you are uploading, a
-**labeled dataset** or **just images**, then pick the folder; a background scan
-reports what is actually in it and refuses to run a labeled job on a folder
-with no labels. Choosing *just images* ignores any labels that are there, so
-what you asked for is what you get.
-
-Where the second screen goes follows from that choice:
-
-| you uploaded | you get |
-| --- | --- |
-| a labeled dataset | **Insights** — metric cards, score distribution, ROC and the confusion matrix — with **Images** (every prediction, filtered by all / FP / FN / AI / real) and **Robustness** (transform picker and degradation curve) behind header tabs |
-| just images | one verdict grid: every image badged AI or authentic, filterable, with no metrics — there is no truth to measure against |
-
-The threshold slider sits in the header and re-reads every view live.
-A `robustness_report.json` sitting next to the data is loaded automatically.
-
-## Sample dataset
-
-`sample_data/` is the folder the GUI offers by default — 100 authentic and 100
-generated images in the labeled layout:
-
-```
-sample_data/
-├── real/
-└── ai/
+    def predict_batch(self, paths):
+        return [float(p) for p in ...]        # 0.0 = authentic, 1.0 = AI
 ```
 
-## Layout
+Import it in `app/detectors/__init__.py` and it appears in the CLI and the
+picker automatically. Two optional overrides are worth knowing:
+
+- `predict_images(images)` — score already-decoded PIL images. The base class
+  round-trips through temp files so a path-only detector still works; override
+  it and the robustness sweep stops touching the disk.
+- `prepare_source(img)` — normalise a freshly decoded image before any
+  degradation is applied, for a model whose training conditioned the source.
+
+Set `default_threshold` in `load()` if your checkpoint carries a calibrated
+operating point; the CLI and the window both adopt it.
+
+---
+
+## Repository layout
 
 ```
 detect.py                  CLI: any folder -> predictions.json (+ metrics)
 robustness.py              CLI: transform sweep -> robustness_report.json
-gui.py                     the window: run, overview, images, robustness
-models/                    bundle.pt (the trained model) lives here
+gui.py                     the window: upload, insights, images, robustness
+requirements.txt
+models/                    bundle.pt (the trained model) lives here — gitignored
 app/
   runner.py                scan / load / score, with all terminal logging
   sweep.py                 robustness sweep core, shared by CLI and GUI
@@ -213,11 +438,72 @@ app/
     clip_head.py           THE model: CLIP ViT-L/14 + trained MLP head
     trained.py             generic slot for any other models/model.pt
   widgets/
-    window.py              app shell: upload screen, results header, run state
+    window.py              app shell: screens, header, threshold, run state
     upload.py              screen 1: declare the data, pick the folder
+    loading.py             the working screen: spinner, phases, progress
     pages.py               the labeled results: insights, images, robustness
     gallery.py             the unlabeled result: a verdict per image
     table.py               predictions table model + score-bar delegate
     charts.py              histogram, ROC, PR, confusion, degradation
     components.py          cards, chips, badges, type scale
 ```
+
+The dependency direction is one-way and worth preserving: `widgets/` may import
+from `app/`, `app/` never imports from `widgets/`. That is what keeps the CLI
+free of any Qt dependency — `detect.py` and `robustness.py` run fine on a
+machine where PyQt6 is not installed.
+
+### Sample dataset
+
+`sample_data/` is the folder the GUI offers by default — 100 authentic and 100
+generated images in the labeled layout. It is gitignored, so it is not in a
+fresh clone:
+
+```
+sample_data/
+├── real/
+└── ai/
+```
+
+---
+
+## Troubleshooting
+
+**`error: <detector> needs a checkpoint, and none is at .../models/bundle.pt`**
+The bundle is gitignored and is not in a clone. Put it at `models/bundle.pt`,
+or pass `--weights <file>`. `python detect.py --list-detectors` shows which
+backends can currently run.
+
+**Everything scores as AI, or everything scores as real.** Check the threshold.
+The calibrated operating point is not `0.5` — it is whatever the bundle carries
+(`0.780` / `0.954` for the two here), and the run log prints it as
+`operating point 0.780`. If you passed `--threshold 0.5` you are asking a
+different question. Run `--best-threshold` to see where F1 actually peaks on
+your data.
+
+**`no labels found - scores only`** on a folder you believe is labeled. The
+scanner tried subfolders, then a manifest, then filename prefixes. Check the
+folder names against the token list above, or pass `--require-labels` to make
+it an error rather than a shrug.
+
+**Some images written as `0.5`.** Those failed to decode. The count and the
+first five names print in the run summary; they are emitted anyway so the
+record count matches the file count.
+
+**The sweep refuses to run.** It measures accuracy, so it needs ground truth.
+An unlabeled folder has nothing to be right or wrong about.
+
+**Unicode errors on a Windows console.** Handled — `runner.py` reconfigures
+stdout/stderr to UTF-8 at import, because a cp1252 console cannot encode a σ in
+a transform label, let alone a CJK filename, and would otherwise kill a run
+mid-way.
+
+---
+
+## Credits
+
+- Training pipeline, weights and calibration — Joe's upstream repository (see
+  [Model provenance](#model-provenance)).
+- Vision tower — `openai/clip-vit-large-patch14`, frozen, redistributed inside
+  the bundle.
+- This repository — inference, evaluation, the robustness lab and the window.

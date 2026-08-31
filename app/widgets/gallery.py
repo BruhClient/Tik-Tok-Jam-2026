@@ -40,7 +40,12 @@ _CACHE_MAX = 512
 
 
 def thumbnail(path: str, width: int, height: int) -> QPixmap:
-    """Decode straight to tile size - never load the full-resolution image."""
+    """Decode straight to tile size - never load the full-resolution image.
+
+    QImageReader.setScaledSize lets the decoder do the downscale as it reads,
+    so a 24 MP photo never exists at full size in memory. Returns a null pixmap
+    for anything undecodable; the delegate draws "no preview" for that.
+    """
     hit = _CACHE.get(path)
     if hit is not None:
         return hit
@@ -56,7 +61,9 @@ def thumbnail(path: str, width: int, height: int) -> QPixmap:
     pix = QPixmap() if image.isNull() else QPixmap.fromImage(image)
 
     if len(_CACHE) >= _CACHE_MAX:
-        _CACHE.clear()                          # cheaper than tracking an LRU
+        # a full clear, not an eviction: an LRU costs bookkeeping on every hit,
+        # and re-decoding at tile size after a scroll is a few milliseconds
+        _CACHE.clear()
     _CACHE[path] = pix
     return pix
 
@@ -70,6 +77,7 @@ class GalleryModel(QAbstractListModel):
         self.rows: list = []
 
     def set_rows(self, rows):
+        """Replace the visible set with these dataset indices (filtering)."""
         self.beginResetModel()
         self.rows = list(rows)
         self.endResetModel()
@@ -78,6 +86,8 @@ class GalleryModel(QAbstractListModel):
         return 0 if parent.isValid() else len(self.rows)
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        """One tile's worth of data. ROLE_ITEM carries the whole tuple, so the
+        delegate makes one call per tile rather than four."""
         if not index.isValid() or self.app.dataset is None:
             return None
         di = self.rows[index.row()]
@@ -100,9 +110,12 @@ class TileDelegate(QStyledItemDelegate):
     """One picture, one verdict pill, one score."""
 
     def sizeHint(self, option, index):
+        # fixed, and matched by setUniformItemSizes on the view - that is what
+        # lets QListView lay out thousands of tiles without measuring them
         return QSize(TILE_W, TILE_H)
 
     def paint(self, painter: QPainter, option, index):
+        """Draw one card: border, letterboxed thumbnail, verdict pill, score."""
         data = index.data(ROLE_ITEM)
         if data is None:
             return
@@ -121,6 +134,9 @@ class TileDelegate(QStyledItemDelegate):
         photo = QRect(r.left() + 1, r.top() + 1, r.width() - 2, THUMB_H)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(QColor(T.TRACK)))
+        # rounded at the top, square at the bottom, drawn as a rounded rect
+        # overlapping a plain one - the picture area meets the verdict strip
+        # flush, and only the card's outer corners are round
         painter.drawRoundedRect(photo.adjusted(0, 0, 0, 12),
                                 T.R_CARD - 1, T.R_CARD - 1)
         painter.drawRect(photo.adjusted(0, 6, 0, 0))
@@ -219,23 +235,32 @@ class GalleryPage(QWidget):
         lay.addWidget(self.view, 1)
 
     def set_filter(self, idx: int):
+        """All / AI / Real. The chips are mutually exclusive, enforced here."""
         self._filter = idx
         for i, chip in enumerate(self.chips):
             chip.setChecked(i == idx)
         self.refresh()
 
     def _open_file(self, index):
+        """Double-click opens the image in the system viewer."""
         data = index.data(ROLE_ITEM)
         if data and os.path.isfile(data[0]):
             QDesktopServices.openUrl(QUrl.fromLocalFile(data[0]))
 
     def refresh(self, charts: bool = False):
+        """Re-apply the filter at the current threshold.
+
+        `charts` is unused here and exists so every page presents the same
+        refresh() signature to AppWindow. A verdict grid has nothing to redraw.
+        """
         app = self.app
         if app.dataset is None:
             self.model.set_rows([])
             self.count_label.setText("")
             return
 
+        # one pass: n_ai counts the whole set, rows collects what passes the
+        # filter, so the header can say "23 of 400 flagged" while showing 23
         rows, n_ai = [], 0
         for di in range(len(app.dataset.items)):
             score = app.score_at(di)

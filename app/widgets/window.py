@@ -9,6 +9,11 @@ there is no ground truth.
 The pipeline itself lives in runner.py / sweep.py and logs to the terminal.
 This owns the widgets and moves the work onto a thread so the window stays
 responsive; it never reimplements the pipeline.
+
+AppWindow is also the single source of truth the pages read from: `dataset`,
+`result`, `threshold` and `robustness` live here, and every page is handed
+`self` and pulls what it needs. That is why moving the slider only has to call
+refresh() - no page holds a copy that could go stale.
 """
 
 from __future__ import annotations
@@ -64,6 +69,8 @@ THRESHOLD_VIEWS = (TAB_INSIGHTS, TAB_IMAGES, VIEW_GALLERY)
 
 
 class AppWindow(QMainWindow):
+    """The window, and the state every page reads from."""
+
     def __init__(self, start_dir: str = None, start_json: str = None,
                  threshold: float = 0.5):
         super().__init__()
@@ -76,9 +83,11 @@ class AppWindow(QMainWindow):
         # What Reset goes back to. A run replaces it with the detector's own
         # operating point, so Reset means "the model's answer", not "0.50".
         self.base_threshold = threshold
-        self.worker = None
-        self.sweep_worker = None
-        self.peek_worker = None
+        # one slot per kind of job. Non-None means "in flight", which is also
+        # how a second click on Run is refused.
+        self.worker = None            # scoring, or reading a predictions.json
+        self.sweep_worker = None      # the robustness sweep
+        self.peek_worker = None       # the cheap background scan of a folder
         self.view = TAB_INSIGHTS
 
         self.setWindowTitle("AIGC Detector")
@@ -97,6 +106,10 @@ class AppWindow(QMainWindow):
         self.overlay = LoadingOverlay(self)
         self.overlay.setGeometry(self.rect())
 
+        # Redrawing three matplotlib figures per slider step would stutter, so a
+        # drag repaints the cheap widgets immediately and defers the charts
+        # until it pauses. Single-shot and restarted on every step: only the
+        # last position ever draws.
         self._chart_timer = QTimer(self)
         self._chart_timer.setSingleShot(True)
         self._chart_timer.timeout.connect(lambda: self.refresh(charts=True))
@@ -113,6 +126,12 @@ class AppWindow(QMainWindow):
 
     # -- results screen ----------------------------------------------------
     def _build_results(self) -> QWidget:
+        """Header plus a stack holding all four result views.
+
+        All four are built up front and switched between, rather than created on
+        demand: the threshold has to reach every one of them, and a page that
+        did not exist yet would come back stale.
+        """
         screen = QWidget()
         outer = QVBoxLayout(screen)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -137,6 +156,8 @@ class AppWindow(QMainWindow):
         return screen
 
     def _build_header(self) -> QWidget:
+        """Two rows: what is loaded and what you can do with it, then tabs and
+        the threshold."""
         bar = QFrame()
         bar.setObjectName("header")
         lay = QVBoxLayout(bar)
@@ -214,6 +235,12 @@ class AppWindow(QMainWindow):
         return bar
 
     def _build_threshold(self) -> QWidget:
+        """The threshold control: a readout, a slider, Best F1 and Reset.
+
+        The slider is an integer widget, so it works in thousandths - three
+        decimals is the resolution the readout shows and enough to sit exactly
+        on a calibrated operating point like 0.954.
+        """
         self.threshold_box = QWidget()
         self.threshold_box.setProperty("bare", True)
         row = QHBoxLayout(self.threshold_box)
@@ -252,6 +279,7 @@ class AppWindow(QMainWindow):
         self.screens.setCurrentIndex(SCREEN_UPLOAD)
 
     def go(self, index: int):
+        """Switch result view, sync the tabs, and refresh what is now visible."""
         self.view = index
         self.stack.setCurrentIndex(index)
         for i, btn in enumerate(self.tabs):
@@ -270,12 +298,23 @@ class AppWindow(QMainWindow):
 
     # -- state helpers -----------------------------------------------------
     def score_at(self, di: int):
+        """The score for dataset index `di`, or None if missing or NaN.
+
+        Every page goes through this rather than indexing result.scores, so
+        "could not be scored" is handled in exactly one place.
+        """
         if self.result is None or di < 0 or di >= len(self.result.scores):
             return None
         s = self.result.scores[di]
         return None if s is None or math.isnan(s) else s
 
     def set_threshold(self, t: float):
+        """Move the slider, which is what actually updates the threshold.
+
+        Deliberately routed through the widget: valueChanged then drives the
+        readout and every refresh, so there is one path and no way for the
+        number and the slider position to disagree.
+        """
         self.slider.setValue(int(round(min(max(t, 0.0), 1.0) * 1000)))
 
     def _sync_reset_tip(self):
@@ -284,12 +323,14 @@ class AppWindow(QMainWindow):
         self.reset_btn.setToolTip(f"Back to {self.base_threshold:.3f}{why}")
 
     def _on_slider(self, value: int):
+        """Live update: cheap views now, charts after the drag settles."""
         self.threshold = value / 1000.0
         self.thr_label.setText(f"{self.threshold:.3f}")
         self.refresh(charts=False)
         self._chart_timer.start(140)
 
     def _best_threshold(self):
+        """Jump to the F1-optimal threshold. Needs both classes present."""
         if self.result is None or self.dataset is None:
             return
         y, s = self.result.valid_pairs(self.dataset)
@@ -298,6 +339,11 @@ class AppWindow(QMainWindow):
         self.set_threshold(M.best_threshold(y, s, "f1"))
 
     def refresh(self, charts: bool = True):
+        """Re-read state into every page. `charts=False` skips the redraws.
+
+        All pages, not just the visible one, so switching tabs never shows a
+        view that is one threshold behind.
+        """
         self.insights_page.refresh(charts=charts)
         self.images_page.refresh()
         self.gallery_page.refresh()
@@ -305,6 +351,7 @@ class AppWindow(QMainWindow):
             self.robustness_page.refresh()
 
     def _sync_header(self):
+        """Retitle the header for whatever is currently loaded."""
         if self.dataset is None:
             self.source_label.setText("")
             self.counts_label.setText("")
@@ -349,8 +396,13 @@ class AppWindow(QMainWindow):
 
     # -- running -----------------------------------------------------------
     def start_run(self, label_mode: LabelMode = None):
+        """Score the chosen folder on a worker thread.
+
+        `label_mode` defaults to what the upload screen declared - NONE for
+        "just images", which ignores labels that are present.
+        """
         if self.worker is not None:
-            return
+            return                    # already running; ignore the second click
         directory = self.upload_page.directory
         if not directory or not os.path.isdir(directory):
             QMessageBox.information(self, "No folder",
@@ -403,6 +455,7 @@ class AppWindow(QMainWindow):
         self.worker.start()
 
     def _on_run_done(self, dataset, result):
+        """A run finished: adopt its results, its threshold, and route to a screen."""
         self.worker = None
         self.overlay.finish()
         self.dataset = dataset
@@ -431,6 +484,7 @@ class AppWindow(QMainWindow):
         self.show_results()
 
     def _on_run_failed(self, message: str):
+        """Bad input or an unexpected error - say so, stay on the upload screen."""
         self.worker = None
         self.overlay.finish()
         self.upload_page.set_busy(False, "Failed.")
@@ -438,6 +492,11 @@ class AppWindow(QMainWindow):
 
     # -- sweep -------------------------------------------------------------
     def start_sweep(self):
+        """Run the selected transform grid. Refuses politely rather than failing.
+
+        Three preconditions, each with its own message: something loaded, ground
+        truth to be right or wrong about, and at least one transform ticked.
+        """
         if self.sweep_worker is not None:
             return
         if self.dataset is None:
@@ -485,6 +544,12 @@ class AppWindow(QMainWindow):
             self.robustness_page.set_busy(True, "Cancelling…")
 
     def _on_sweep_done(self, result):
+        """Adopt the sweep and write the report next to the data.
+
+        Writing it here rather than in the worker means the GUI leaves behind
+        exactly the file robustness.py would have, which gui.py then picks up
+        automatically on the next run over that folder.
+        """
         self.sweep_worker = None
         self.robustness = result.to_view()
         path = os.path.join(self.dataset.root, SW.DEFAULT_REPORT)
@@ -504,6 +569,7 @@ class AppWindow(QMainWindow):
 
     # -- export ------------------------------------------------------------
     def export_json(self):
+        """Write predictions.json - the same file, from the same code, as the CLI."""
         if self.result is None:
             return
         default = os.path.join(self.dataset.root or os.path.expanduser("~"),
@@ -522,6 +588,11 @@ class AppWindow(QMainWindow):
 
     # -- shutdown ----------------------------------------------------------
     def closeEvent(self, event):
+        """Ask every live worker to stop and give it a moment before quitting.
+
+        A QThread still running when the interpreter tears down its parent is a
+        crash on exit, so this waits rather than trusting the timing.
+        """
         for w in (self.worker, self.sweep_worker, self.peek_worker):
             if w is not None:
                 if hasattr(w, "cancel"):

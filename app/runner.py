@@ -3,6 +3,15 @@
 All the work - scanning, loading the model, scoring, timing - happens here and
 reports to stdout. The GUI never runs any of it in the background; it opens on
 a finished result.
+
+Two listeners, deliberately: log()/step() write to the terminal for everyone,
+while an optional `progress` callback lets the GUI's working screen narrate the
+same run. The callback is a plain argument rather than module state, so two
+runs can never narrate into each other.
+
+Step numbering (`total_steps`) differs per entry point - detect.py takes 5 steps
+because it also writes files, robustness.py takes 4 - which is why every
+function takes it rather than assuming.
 """
 
 from __future__ import annotations
@@ -22,6 +31,8 @@ from .detectors import available_detectors, get_detector, weights_detectors
 # logging
 # --------------------------------------------------------------------------- #
 
+#: set by --quiet. Only silences log()/step(); warn() still goes to stderr,
+#: because a caller that asked for quiet still wants to know what broke.
 QUIET = False
 
 
@@ -44,15 +55,18 @@ _make_console_utf8_safe()
 
 
 def log(message: str = "", indent: int = 0) -> None:
+    """A line of terminal output. flush=True so a piped run stays live."""
     if not QUIET:
         print(" " * indent + message, flush=True)
 
 
 def step(n: int, total: int, message: str) -> None:
+    """A numbered heading: [2/5] loading detector."""
     log(f"[{n}/{total}] {message}")
 
 
 def warn(message: str) -> None:
+    """A problem that did not stop the run. Ignores QUIET, and goes to stderr."""
     print("  ! " + message, file=sys.stderr, flush=True)
 
 
@@ -81,6 +95,7 @@ def _eta_text(done: int, total: int, started: float) -> str:
 
 
 def _progress(done: int, total: int, started: float) -> None:
+    """The terminal progress bar. Redraws in place until the final line."""
     if QUIET:
         return
     rate = done / max(time.perf_counter() - started, 1e-6)
@@ -88,6 +103,8 @@ def _progress(done: int, total: int, started: float) -> None:
     bar_len = 24
     filled = int(bar_len * done / total)
     bar = "#" * filled + "-" * (bar_len - filled)
+    # carriage return until the last update, so one line is rewritten
+    # instead of thousands being appended
     end = "\n" if done >= total else "\r"
     print(f"      [{bar}] {done:>6,}/{total:,} ({pct:3.0f}%)  {rate:6.1f} img/s",
           end=end, flush=True)
@@ -99,6 +116,13 @@ def _progress(done: int, total: int, started: float) -> None:
 
 @dataclass
 class RunResult:
+    """Everything one scoring pass produced, aligned with a Dataset.
+
+    `scores[i]` belongs to `dataset.items[i]`; an image that could not be scored
+    holds NaN here and is written as 0.5 by the exporter, so the two lists never
+    drift out of step.
+    """
+
     detector_name: str = ""
     detector_display: str = ""
     scores: list = field(default_factory=list)      # aligned with dataset.items
@@ -109,6 +133,7 @@ class RunResult:
 
     @property
     def n_scored(self) -> int:
+        """How many images actually produced a number (NaN = failed to score)."""
         return sum(1 for s in self.scores if s is not None and not math.isnan(s))
 
     def valid_pairs(self, dataset: Dataset):
@@ -145,6 +170,12 @@ def default_detector_name(weights: str = None) -> str:
 
 
 def load_detector(name: str = None, weights: str = None, progress_cb=None):
+    """Instantiate a backend and load it. Raises SystemExit on bad input.
+
+    SystemExit rather than a custom exception because every caller - the two CLI
+    scripts and the Qt workers - already handles it, and its payload is the
+    message a user should read.
+    """
     name = name or default_detector_name(weights)
     try:
         detector = get_detector(name, weights)
@@ -216,6 +247,11 @@ def scan(directory: str, total_steps: int = 4,
 
 
 def score(ds: Dataset, detector, total_steps: int = 4, progress=None) -> RunResult:
+    """Score every item in `ds`, batch by batch, reporting as it goes.
+
+    Batching is the detector's call (`batch_size`); a smaller batch costs a
+    little throughput and buys a smoother progress bar.
+    """
     progress = progress or _noop_progress
     step(3, total_steps, "scoring")
     paths = [it.path for it in ds.items]
@@ -230,6 +266,8 @@ def score(ds: Dataset, detector, total_steps: int = 4, progress=None) -> RunResu
         chunk = paths[start:start + bs]
         try:
             batch = [float(s) for s in detector.predict_batch(chunk)]
+            # a backend that returns the wrong count would silently shift every
+            # later score onto the wrong image - pad or truncate instead
             if len(batch) != len(chunk):
                 batch = (batch + [float("nan")] * len(chunk))[:len(chunk)]
         except Exception as exc:                    # a bad batch must not kill the run
@@ -263,6 +301,7 @@ def score(ds: Dataset, detector, total_steps: int = 4, progress=None) -> RunResu
 
 def prepare_detector(name: str = None, weights: str = None, total_steps: int = 4,
                      progress=None):
+    """Resolve, announce and load a backend. Returns the loaded detector."""
     progress = progress or _noop_progress
     step(2, total_steps, "loading detector")
 
@@ -353,6 +392,11 @@ def load_predictions(json_path: str, total_steps: int = 2, progress=None):
 
 
 def _common_root(paths: list) -> str:
+    """Deepest folder containing every path, for rebuilding rel_path from a JSON.
+
+    Returns "" when the paths span drives, which is not an error - it just means
+    the table shows basenames instead of relative paths.
+    """
     try:
         root = os.path.commonpath(paths)
     except ValueError:                       # different drives

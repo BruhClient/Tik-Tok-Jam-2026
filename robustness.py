@@ -10,6 +10,11 @@ up and draws it.
 
 Ground-truth labels are required - this measures accuracy, not just scores,
 so point it at a folder holding real/ and ai/.
+
+The grid is transforms x severities: --transforms picks which degradations,
+--severities picks how hard, and every combination becomes one cell. A clean
+baseline cell is always measured on top, through the same pipeline, because a
+drop is only meaningful against a comparable reference.
 """
 
 from __future__ import annotations
@@ -25,6 +30,8 @@ from app import runner                                    # noqa: E402
 from app import sweep as SW                               # noqa: E402
 from app.transforms import TRANSFORMS, TRANSFORMS_BY_KEY  # noqa: E402
 
+#: the five worth running by default - the common codecs, the two resizes, and
+#: the realistic combo. The rest are opt-in via --transforms.
 DEFAULT_TRANSFORMS = "jpeg,blur,rescale,crop,social"
 
 
@@ -44,7 +51,8 @@ def parse_args(argv=None):
                     help="decode cap in pixels (default: 768)")
     ap.add_argument("--detector", "-d", default=None, help="registered detector name")
     ap.add_argument("--weights", "-w", default=None,
-                    help="checkpoint to load (default: models/model.pt)")
+                    help="checkpoint to load (default: the backend's own, "
+                         "e.g. models/bundle.pt)")
     ap.add_argument("--threshold", "-t", type=float, default=None,
                     help="decision threshold for the reported accuracy "
                          "(default: the detector's own operating point, or 0.5)")
@@ -92,12 +100,15 @@ def main(argv=None) -> int:
         return 2
 
     keys = [k.strip() for k in args.transforms.split(",") if k.strip()]
+    # "clean" is rejected on purpose: the baseline always runs, and asking for it
+    # as a cell would compare it against itself
     unknown = [k for k in keys if k not in TRANSFORMS_BY_KEY or k == "clean"]
     if unknown:
         print(f"error: unknown transform(s): {', '.join(unknown)}\n"
               f"       available: {', '.join(t.key for t in TRANSFORMS)}", file=sys.stderr)
         return 2
     severities = [int(s) for s in args.severities.split(",") if s.strip()]
+    # the full cross product: every transform at every severity asked for
     cells = [(k, sv) for k in keys for sv in severities]
 
     try:

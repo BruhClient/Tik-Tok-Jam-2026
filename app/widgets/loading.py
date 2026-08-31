@@ -15,6 +15,9 @@ So this narrates. Three things, in descending size:
 
 Nothing here computes anything. It renders what runner.py reports, and the
 same text still goes to the terminal.
+
+It is a child widget of the window, kept sized to it by AppWindow.resizeEvent,
+rather than a dialog - see LoadingOverlay for why.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ PENDING, ACTIVE, DONE = range(3)
 
 
 def fmt_duration(seconds: float) -> str:
+    """Seconds as 4.2s under a minute, m:ss above it."""
     if seconds != seconds or seconds < 0:            # NaN or negative
         return "--"
     if seconds < 60:
@@ -61,6 +65,7 @@ class Spinner(QWidget):
     def __init__(self, size: int = 76, parent=None):
         super().__init__(parent)
         self.setFixedSize(size, size)
+        # decoration only - clicks belong to whatever is behind it
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._angle = 0.0
         self._t0 = time.perf_counter()
@@ -85,6 +90,7 @@ class Spinner(QWidget):
         self.stop()
 
     def _tick(self):
+        """Advance the rotation. update() requests a paint, it does not paint."""
         self._angle = (self._angle + 3.0) % 360.0
         self.update()
 
@@ -111,6 +117,7 @@ class Spinner(QWidget):
         painter.drawEllipse(rect)
 
     def paintEvent(self, event):
+        """Two comet rings and the breathing core, back to front."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         side = min(self.width(), self.height())
@@ -155,6 +162,7 @@ class ProgressBar(QWidget):
         self._timer.timeout.connect(self._tick)
 
     def set_progress(self, done: int, total: int):
+        """total <= 0 switches to the indeterminate shuttle, and starts its timer."""
         self._done, self._total = int(done), int(total)
         if self._total <= 0:
             if not self._timer.isActive():
@@ -172,6 +180,7 @@ class ProgressBar(QWidget):
         self.update()
 
     def paintEvent(self, event):
+        """Track, then either the filled fraction or the sweeping segment."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         width, height = float(self.width()), float(self.height())
@@ -185,6 +194,8 @@ class ProgressBar(QWidget):
         if self._total > 0:
             frac = max(0.0, min(1.0, self._done / self._total))
             if frac > 0:
+                # max(height, ...): below one bar-height a rounded rect collapses
+                # into a sliver, so tiny progress would look like none
                 painter.drawRoundedRect(
                     QRectF(0, 0, max(height, width * frac), height),
                     radius, radius)
@@ -229,6 +240,11 @@ class PhaseRow(QWidget):
         self._paint()
 
     def set_state(self, state: int):
+        """Move this step between pending / active / done, timing the active run.
+
+        Returns early when the state is unchanged, so set_phase() can be called
+        on every progress report without restarting the clock.
+        """
         if state == self.state:
             return
         if state == ACTIVE:
@@ -267,10 +283,10 @@ class LoadingOverlay(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._rows: dict = {}
-        self._order: list = []
+        self._rows: dict = {}      # phase key -> PhaseRow
+        self._order: list = []     # phase keys, in the order they will run
         self._active = None
-        self._t0 = 0.0
+        self._t0 = 0.0             # when begin() was called, for the footer clock
 
         self.card = QWidget(self)
         self.card.setObjectName("loadcard")
@@ -352,6 +368,7 @@ class LoadingOverlay(QWidget):
 
     # -- geometry ----------------------------------------------------------
     def paintEvent(self, event):
+        """The scrim. Alpha rather than opaque, so the window stays recognisable."""
         QPainter(self).fillRect(self.rect(), QColor(10, 11, 13, 205))
 
     def resizeEvent(self, event):
@@ -359,6 +376,8 @@ class LoadingOverlay(QWidget):
         self._centre()
 
     def _centre(self):
+        """Re-centre the card. Called on resize and whenever its height changes -
+        the detail line wraps, so the card grows and shrinks during a run."""
         width = self.card.width()
         height = self.card.sizeHint().height()
         self.card.setGeometry((self.width() - width) // 2,
@@ -416,6 +435,7 @@ class LoadingOverlay(QWidget):
         self._centre()
 
     def set_progress(self, done: int, total: int, note: str = ""):
+        """Update the bar and its counter. total <= 0 shows only the note."""
         self.bar.set_progress(done, total)
         if total > 0:
             text = f"{done:,} / {total:,}   ·   {100.0 * done / total:.0f}%"
@@ -426,6 +446,7 @@ class LoadingOverlay(QWidget):
             self.counter.setText(note)
 
     def finish(self):
+        """Mark everything done, stop the clock, hide. Safe if never shown."""
         for key in self._order:
             self._rows[key].set_state(DONE)
         self._clock.stop()

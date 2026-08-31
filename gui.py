@@ -14,6 +14,11 @@ goes to this terminal; the window shows finished results.
 CLI equivalents:
     python detect.py <dir>       score a folder -> predictions.json (+ metrics)
     python robustness.py <dir>   transform sweep -> robustness_report.json
+
+This file is only the launcher: parse the one optional argument, apply the
+theme, open the window. Everything the window does lives in app/widgets/, and
+everything it computes lives in app/ - PyQt6 is imported inside main() so that
+importing this module costs nothing.
 """
 
 from __future__ import annotations
@@ -27,15 +32,23 @@ sys.path.insert(0, PROJECT_ROOT)
 #: folder offered when the app starts with no argument
 DEFAULT_DATA_DIR = "sample_data"
 
+#: where the slider starts before anything is loaded. A finished run replaces it
+#: with the detector's own calibrated operating point (~0.954 for the bundle),
+#: which is also what Reset then returns to - see AppWindow._on_run_done.
 DEFAULT_THRESHOLD = 0.5
 
 
 def main() -> int:
+    """Returns a process exit code: Qt's on a clean exit, 2 for a bad argument."""
+    # imported here, not at module scope: a bad path should fail before the cost
+    # of pulling in Qt, and this module stays importable without a display
     from PyQt6.QtWidgets import QApplication
 
     from app import theme
     from app.widgets.window import AppWindow
 
+    # one optional positional argument, and its extension decides the mode:
+    # a .json is a finished result to visualise, anything else is a folder to run
     arg = sys.argv[1] if len(sys.argv) > 1 else None
     start_dir = start_json = None
 
@@ -53,6 +66,8 @@ def main() -> int:
     QApplication.setApplicationName("AIGC Detector")
     QApplication.setOrganizationName("Hackathon")
 
+    # sys.argv[:1]: our own argument is already parsed, and handing it to Qt
+    # would have it try to interpret the path as a Qt option
     app = QApplication(sys.argv[:1])
     app.setStyleSheet(theme.STYLESHEET)
     theme.apply_matplotlib_style()

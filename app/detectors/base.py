@@ -21,6 +21,20 @@ architecture code:
 
 ...then import it in app/detectors/__init__.py. It appears in the toolbar
 picker automatically.
+
+The contract in full:
+
+    predict_batch(paths) -> [float]   required. One score per path, in order,
+                                      NaN for a file that could not be read.
+    predict_images(imgs) -> [float]   optional. Same, for decoded PIL images.
+    prepare_source(img)  -> img       optional. Condition a source image the way
+                                      training did, before any degradation.
+    load() / unload()                 optional lifecycle, called off the GUI
+                                      thread; do the expensive work in load().
+    default_threshold                 where "AI" starts for this backend.
+
+Scores are P(AI) in [0, 1] and must not depend on the threshold, on batch
+composition, or on how many times the detector has been called.
 """
 
 from __future__ import annotations
@@ -40,9 +54,9 @@ class Detector(ABC):
     Scores are confidences in [0, 1] that the image is AI-generated.
     """
 
-    name: str = "base"
-    display_name: str = "Base detector"
-    description: str = ""
+    name: str = "base"            # the --detector key, stable and lowercase
+    display_name: str = "Base detector"   # shown in the picker and the header
+    description: str = ""         # one paragraph, shown as the picker tooltip
     # Recommended images per predict_batch call; smaller = smoother progress.
     batch_size: int = 16
 
@@ -64,6 +78,8 @@ class Detector(ABC):
     progress_cb = None
 
     def __init__(self):
+        # loading is deferred to ensure_loaded() so constructing a detector -
+        # which the picker does for every registered backend - stays free
         self._loaded = False
 
     def note(self, message: str) -> None:
@@ -74,6 +90,7 @@ class Detector(ABC):
     # -- readiness ---------------------------------------------------------
     @classmethod
     def resolve_weights(cls, weights: str = None) -> str:
+        """The checkpoint this backend would actually load: override or default."""
         return weights or cls.default_weights
 
     @classmethod
@@ -96,6 +113,7 @@ class Detector(ABC):
         """Release resources."""
 
     def ensure_loaded(self) -> None:
+        """Load once, on first use. Safe to call before every batch."""
         if not self._loaded:
             self.load()
             self._loaded = True
@@ -115,6 +133,8 @@ class Detector(ABC):
         tmp_paths = []
         try:
             for img in images:
+                # PNG, not JPEG: a lossy round-trip here would silently add a
+                # degradation the sweep did not ask for
                 fd, p = tempfile.mkstemp(suffix=".png")
                 os.close(fd)
                 img.convert("RGB").save(p)
@@ -158,7 +178,10 @@ class Detector(ABC):
 
 
 def register(cls):
-    """Class decorator that adds a detector to the registry."""
+    """Class decorator that adds a detector to the registry.
+
+    Keyed by `name`, so a second class with the same name replaces the first.
+    """
     _REGISTRY[cls.name] = cls
     return cls
 
@@ -170,6 +193,8 @@ def available_detectors() -> list:
     missing, so an empty slot sits at the bottom until weights exist and then
     becomes usable everywhere with no flag to flip.
     """
+    # (not is_ready, display_name): False sorts before True, so runnable
+    # backends come first and the rest are alphabetical within each group
     return sorted(_REGISTRY.values(),
                   key=lambda c: (not c.is_ready(), c.display_name))
 
@@ -180,6 +205,11 @@ def weights_detectors() -> list:
 
 
 def get_detector(name: str, weights: str = None) -> Detector:
+    """Construct a registered detector. Raises KeyError on an unknown name.
+
+    Returns a fresh instance every time: `weights` and `progress_cb` are set per
+    instance, so two runs with different checkpoints cannot interfere.
+    """
     cls = _REGISTRY.get(name)
     if cls is None:
         raise KeyError(f"No detector registered under {name!r}")

@@ -2,6 +2,16 @@
 
 The work itself lives in runner.py / sweep.py and logs to the terminal exactly
 as the CLI scripts do - these classes only move it off the GUI thread.
+
+Every worker follows the same contract - `finished_ok`, `failed`, and a
+five-argument `progress` signal - so AppWindow can wire any of them to the same
+slots. Signals are the only way results cross back: Qt queues them onto the GUI
+thread, and touching a widget from in here directly would be a crash waiting to
+happen.
+
+SystemExit is caught separately because the runner raises it for bad input (no
+such folder, missing checkpoint) with a message meant to be read; an unexpected
+exception also prints a traceback, since that one is a bug.
 """
 
 from __future__ import annotations
@@ -30,6 +40,7 @@ class ScanWorker(QThread):
         self.directory = directory
 
     def run(self):
+        """Runs on the worker thread. Never touch a widget from in here."""
         try:
             self.finished_ok.emit(DS.scan_directory(self.directory))
         except Exception as exc:
@@ -45,6 +56,8 @@ class ScoreWorker(QThread):
     #: which is the only reason the pipeline may report from in here at all
     progress = pyqtSignal(str, str, int, int, str)
 
+    #: label_mode is passed through rather than inferred: LabelMode.NONE is how
+    #: the upload screen says "score this blind even though labels are present"
     def __init__(self, directory: str, detector_name: str = None,
                  weights: str = None, label_mode=DS.LabelMode.AUTO, parent=None):
         super().__init__(parent)
@@ -54,6 +67,7 @@ class ScoreWorker(QThread):
         self.label_mode = label_mode
 
     def _report(self, phase, detail="", done=0, total=0, note=""):
+        """Adapter: the runner's plain callback shape -> a Qt signal."""
         self.progress.emit(phase, detail, int(done), int(total), note)
 
     def run(self):
@@ -116,12 +130,15 @@ class SweepWorker(QThread):
         self._stop = False
 
     def cancel(self):
+        """Ask the sweep to stop. It checks between cells, so a long cell
+        finishes first - the alternative is a half-scored cell in the report."""
         self._stop = True
 
     def _report(self, phase, detail="", done=0, total=0, note=""):
         self.progress.emit(phase, detail, int(done), int(total), note)
 
     def _on_cell(self, i, n, name, metrics):
+        """Called by run_sweep after each cell, on this thread."""
         self.cell_done.emit(i, n, name)
         self._report("sweep", name, i, n,
                      f"acc {metrics.accuracy * 100:.1f}%"

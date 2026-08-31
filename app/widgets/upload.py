@@ -5,6 +5,12 @@ whichever way the scan fell. Here the choice is explicit and enforced - you
 declare a labeled dataset or plain images, and the app either honours it or
 tells you the folder cannot support it. That is what decides which results
 screen you land on.
+
+The enforcement is the peek: a ScanWorker reads the folder in the background as
+soon as a path is typed, and _peek_text() turns what it found plus what you
+declared into the sentence under the field and into whether Run is enabled. The
+scan always runs with AUTO, so one scan answers both modes and switching the
+tile re-reads it rather than rescanning.
 """
 
 from __future__ import annotations
@@ -23,6 +29,8 @@ from ..detectors import available_detectors
 from . import components as C
 from .components import Card, Hint, SectionTitle
 
+#: the two upload kinds. MODE_IMAGES maps to LabelMode.NONE, which is what
+#: makes "just images" ignore labels that happen to be there.
 MODE_LABELED, MODE_IMAGES = range(2)
 
 #: what the scanner tries, in order - quoted back when a labeled folder has none
@@ -63,10 +71,13 @@ class ModeTile(QFrame):
         return self._checked
 
     def setChecked(self, checked: bool):
+        """Selection is set by the page, not toggled here - the two tiles are
+        mutually exclusive and UploadPage.set_mode owns that."""
         self._checked = bool(checked)
         self._paint()
 
     def _paint(self):
+        """Repaint for the current selection state."""
         if self._checked:
             self.setStyleSheet(
                 'QFrame[tile="true"] { background-color: %s;'
@@ -93,7 +104,9 @@ class UploadPage(QWidget):
         super().__init__(parent)
         self.app = app
         self.peek = None                   # Dataset from the last folder scan
-        self.mode = None                   # nothing is assumed on your behalf
+        # None until you choose. Neither tile is preselected: defaulting to
+        # "labeled" would quietly make the choice this screen exists to ask.
+        self.mode = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(28, 0, 28, 28)
@@ -123,6 +136,7 @@ class UploadPage(QWidget):
 
     # -- construction ------------------------------------------------------
     def _build_brand(self) -> QHBoxLayout:
+        """The mark and the one-line description above the card."""
         brand = QHBoxLayout()
         brand.setSpacing(11)
         mark = QLabel()                    # the app mark, drawn not typeset
@@ -144,6 +158,7 @@ class UploadPage(QWidget):
         return brand
 
     def _build_card(self) -> QWidget:
+        """The whole form, top to bottom: kind, folder, model, actions."""
         card = Card(padding=20)
         lay = card.layout()
         lay.setSpacing(12)
@@ -238,6 +253,8 @@ class UploadPage(QWidget):
     # -- state -------------------------------------------------------------
     @property
     def directory(self) -> str:
+        # strip('"') because a path pasted from Explorer's "copy as path"
+        # arrives wrapped in quotes
         return self.path_edit.text().strip().strip('"')
 
     @property
@@ -254,6 +271,7 @@ class UploadPage(QWidget):
         return LabelMode.NONE if self.mode == MODE_IMAGES else LabelMode.AUTO
 
     def set_mode(self, mode: int):
+        """Select one of the two tiles and re-read the peek under that choice."""
         self.mode = mode
         for i, tile in enumerate(self.tiles):
             tile.setChecked(i == mode)
@@ -264,6 +282,7 @@ class UploadPage(QWidget):
 
     # -- browsing ----------------------------------------------------------
     def browse_folder(self):
+        """Pick the image folder. Starts where the field currently points."""
         start = self.directory or os.path.expanduser("~")
         path = QFileDialog.getExistingDirectory(self, "Select image folder", start)
         if path:
@@ -285,6 +304,12 @@ class UploadPage(QWidget):
             self.weights_edit.setText(path)
 
     def set_busy(self, busy: bool, message: str = ""):
+        """Lock the form while a run is in flight, and unlock it after.
+
+        Unlocking goes through _sync() rather than enabling everything, so a
+        failed run does not leave Run clickable on a folder that cannot support
+        the declared mode.
+        """
         for w in (self.detector_combo, self.weights_row, self.path_edit,
                   self.browse_btn, self.open_btn):
             w.setEnabled(not busy)
@@ -299,6 +324,7 @@ class UploadPage(QWidget):
 
     # -- folder peek -------------------------------------------------------
     def _on_path_changed(self):
+        """Every keystroke: drop the stale peek, then rescan if it is a folder."""
         self.peek = None
         self._sync()
         if os.path.isdir(self.directory):
@@ -341,6 +367,12 @@ class UploadPage(QWidget):
                 f"   ·   {source}", T.TEXT_DIM, True)
 
     def _sync(self):
+        """Single place that decides what is enabled and what the screen says.
+
+        Everything - choosing a tile, typing a path, a peek landing, changing
+        the model - ends up here, so the state can never be assembled two
+        different ways.
+        """
         cls = next((c for c in available_detectors()
                     if c.name == self.detector_name), None)
         self.weights_row.setVisible(bool(cls and cls.requires_weights))

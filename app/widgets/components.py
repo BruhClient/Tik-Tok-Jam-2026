@@ -1,4 +1,10 @@
-"""Small reusable UI pieces."""
+"""Small reusable UI pieces.
+
+Everything here is presentation only - no widget in this module knows about a
+dataset, a score or a threshold. That is what lets the pages compose them freely
+and what keeps the type scale and the card treatment consistent across screens
+that were written at different times.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +16,9 @@ from PyQt6.QtWidgets import (
 from .. import theme as T
 
 
-#: one type scale, used everywhere - no arbitrary sizes
+#: One type scale, used everywhere - no arbitrary sizes. Five steps is enough
+#: to build a hierarchy and few enough that two labels of the same rank can
+#: never end up a pixel apart.
 FS_MICRO, FS_SMALL, FS_BODY, FS_TITLE, FS_VALUE = 10, 11, 13, 15, 28
 
 
@@ -35,6 +43,7 @@ class Card(QFrame):
         self._layout.setSpacing(8)
 
     def layout(self) -> QVBoxLayout:  # type: ignore[override]
+        """The card's own layout - add content to this, not to the card."""
         return self._layout
 
 
@@ -76,6 +85,11 @@ class StatCard(Card):
         )
 
     def set_value(self, text: str, sub: str = None, color: str = None):
+        """Update the tile. `sub=None` leaves the sub-line as it was.
+
+        `color` is how a tile flags a bad number (an FPR over 10%); the default
+        is the normal text colour, so a tile never stays red by accident.
+        """
         self.value_label.setText(text)
         self._paint_value(color or T.TEXT)
         if sub is not None:
@@ -86,6 +100,8 @@ class StatCard(Card):
 
 
 class Badge(QLabel):
+    """A pill with a border - a short status word, not a control."""
+
     def __init__(self, text: str = "", color: str = T.TEXT_DIM, parent=None):
         super().__init__(text, parent)
         self.set_color(color)
@@ -111,6 +127,9 @@ class Dot(QLabel):
 
 
 class Chip(QPushButton):
+    """A checkable filter pill. The pages own the mutual exclusion themselves,
+    since the same chip row also has to be settable from code."""
+
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
         self.setCheckable(True)
@@ -144,6 +163,8 @@ class SectionTitle(QLabel):
 
 
 class Hint(QLabel):
+    """Quiet explanatory line under a control. Wraps rather than elides."""
+
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
         self.setWordWrap(True)
@@ -180,7 +201,12 @@ class EmptyState(QWidget):
 
 
 def score_color(score: float) -> str:
-    """Teal (authentic) -> amber -> red (AI)."""
+    """Teal (authentic) -> amber -> red (AI).
+
+    Fixed bands, deliberately not the live threshold: this colours the *score*,
+    and a hue that moved as the slider moved would make two images with the same
+    number look different. The threshold is shown by the verdict text next to it.
+    """
     if score is None or score != score:
         return T.TEXT_FAINT
     if score < 0.35:

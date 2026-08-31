@@ -2,6 +2,15 @@
 
 Each transform has 5 severity levels (1 = mild, 5 = harsh). Everything runs in
 memory on PIL images - nothing is written to disk during a sweep.
+
+These are not adversarial attacks. Every one of them is something an image
+routinely survives on the way to a screen - a platform re-encode, a resize into
+a feed, a screenshot of a repost - which is what makes the drop they cause the
+honest measure of whether a detector is usable outside a benchmark.
+
+Adding one: write `fn(img, param) -> img`, then add a TransformSpec with five
+parameter values and five human labels. It shows up in the CLI and the GUI
+picker automatically.
 """
 
 from __future__ import annotations
@@ -14,6 +23,11 @@ from PIL import Image, ImageEnhance, ImageFilter
 
 
 def _recompress(img: Image.Image, fmt: str, **params) -> Image.Image:
+    """Encode and decode in memory, so the codec's damage lands in the pixels.
+
+    Re-opening the buffer is the whole point: without the decode you have the
+    original image and a discarded byte string.
+    """
     buf = io.BytesIO()
     out = img.convert("RGB")
     out.save(buf, format=fmt, **params)
@@ -26,19 +40,27 @@ def _recompress(img: Image.Image, fmt: str, **params) -> Image.Image:
 # --------------------------------------------------------------------------- #
 
 def jpeg_compress(img, quality: int):
+    """JPEG at `quality`, 4:2:0 - the chroma subsampling the format ships with."""
     return _recompress(img, "JPEG", quality=int(quality), subsampling=2)
 
 
 def webp_compress(img, quality: int):
+    """WebP at `quality`. What most CDNs and image proxies serve today."""
     return _recompress(img, "WEBP", quality=int(quality))
 
 
 def gaussian_blur(img, sigma: float):
+    """Soften high-frequency detail - where generator fingerprints tend to live."""
     return img.filter(ImageFilter.GaussianBlur(radius=float(sigma)))
 
 
 def rescale(img, factor: float):
-    """Downscale then back up - the classic detail-destroying resize."""
+    """Downscale then back up - the classic detail-destroying resize.
+
+    Down with LANCZOS and back up with BICUBIC on purpose: that asymmetry is
+    what a real pipeline does, and it is what makes the lost detail
+    unrecoverable rather than merely resampled.
+    """
     w, h = img.size
     nw, nh = max(1, int(w * factor)), max(1, int(h * factor))
     small = img.resize((nw, nh), Image.LANCZOS)
@@ -46,6 +68,7 @@ def rescale(img, factor: float):
 
 
 def center_crop(img, keep: float):
+    """Keep the middle `keep` fraction. Tests reliance on global composition."""
     w, h = img.size
     nw, nh = max(1, int(w * keep)), max(1, int(h * keep))
     left, top = (w - nw) // 2, (h - nh) // 2
@@ -53,15 +76,18 @@ def center_crop(img, keep: float):
 
 
 def brightness_contrast(img, delta: float):
+    """Brighten and flatten together, the way a colour grade actually moves."""
     out = ImageEnhance.Brightness(img).enhance(1.0 + delta)
     return ImageEnhance.Contrast(out).enhance(1.0 - delta * 0.6)
 
 
 def saturation_shift(img, delta: float):
+    """Push colour intensity, as a filter preset does."""
     return ImageEnhance.Color(img).enhance(1.0 + delta)
 
 
 def gaussian_noise(img, sigma: float, seed: int = 0):
+    """Additive sensor-like noise. Seeded, so a sweep is reproducible."""
     arr = np.asarray(img.convert("RGB"), dtype=np.float32)
     rng = np.random.default_rng(seed)
     arr += rng.normal(0.0, float(sigma), arr.shape).astype(np.float32)
@@ -69,11 +95,16 @@ def gaussian_noise(img, sigma: float, seed: int = 0):
 
 
 def sharpen(img, amount: float):
+    """Not a transform of its own - a component of the social repost combo."""
     return ImageEnhance.Sharpness(img).enhance(1.0 + amount)
 
 
 def social_repost(img, level: int):
-    """Downscale + sharpen + JPEG, i.e. what a platform does on re-upload."""
+    """Downscale + sharpen + JPEG, i.e. what a platform does on re-upload.
+
+    The most realistic cell in the grid, and usually the harshest: the three
+    steps compound, and a real repost chains all three too.
+    """
     scale = [0.9, 0.75, 0.6, 0.45, 0.35][level - 1]
     quality = [88, 78, 68, 55, 42][level - 1]
     w, h = img.size
@@ -97,6 +128,13 @@ def screenshot(img, level: int):
 
 @dataclass
 class TransformSpec:
+    """One transform and its five severity settings.
+
+    `levels` holds the parameter passed to `fn`; `level_labels` holds what to
+    show a human for each ("q75", "sigma 1.0"). They are parallel, and both are
+    indexed by severity - 1 (mild).
+    """
+
     key: str
     display_name: str
     description: str
@@ -105,10 +143,12 @@ class TransformSpec:
     level_labels: list = field(default_factory=list)
 
     def apply(self, img: Image.Image, severity: int) -> Image.Image:
+        """Run this transform at 1-5. Out-of-range severities clamp, not crash."""
         severity = max(1, min(5, int(severity)))
         return self.fn(img, self.levels[severity - 1])
 
     def label_for(self, severity: int) -> str:
+        """What to call this severity in a chart, a table or the CLI."""
         severity = max(1, min(5, int(severity)))
         if self.level_labels:
             return self.level_labels[severity - 1]
@@ -184,13 +224,17 @@ CLEAN = TransformSpec(
     [None] * 5, lambda img, _param: img, ["clean"] * 5,
 )
 
+#: lookup by key. CLEAN is reachable here but deliberately not in TRANSFORMS -
+#: it is the baseline the sweep always runs, never something you select.
 TRANSFORMS_BY_KEY = {t.key: t for t in TRANSFORMS}
 TRANSFORMS_BY_KEY[CLEAN.key] = CLEAN
 
 
 def get_transform(key: str) -> TransformSpec:
+    """Look up a spec by key. Raises KeyError on an unknown one."""
     return TRANSFORMS_BY_KEY[key]
 
 
 def apply_transform(img: Image.Image, key: str, severity: int) -> Image.Image:
+    """One-shot convenience: look up `key` and apply it at `severity`."""
     return TRANSFORMS_BY_KEY[key].apply(img, severity)

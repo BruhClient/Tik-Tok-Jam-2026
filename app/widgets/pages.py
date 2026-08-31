@@ -2,6 +2,10 @@
 
 The upload screen lives in upload.py and the unlabeled verdict grid in
 gallery.py; these three are the labeled destinations.
+
+None of them stores results. Each `refresh()` re-reads app.dataset, app.result
+and app.threshold, which is what lets the header slider drive every view at once
+without any page having to be told what changed.
 """
 
 from __future__ import annotations
@@ -25,16 +29,22 @@ from .charts import MplCanvas
 from .components import Card, Chip, Hint, SectionTitle, StatCard, score_color
 from .table import COLUMNS, ROLE_INDEX, ResultsModel, ScoreBarDelegate, label_text
 
+#: the Images page filters. FP and FN need ground truth; the other three are
+#: purely a function of the threshold.
 FILTER_ALL, FILTER_FP, FILTER_FN, FILTER_AI, FILTER_REAL = range(5)
 
 
 def delta_text(value: float) -> str:
+    """A robustness delta in percentage points, signed. NaN -> em dash."""
     if value is None or value != value:
         return "—"
     return f"{'+' if value >= 0 else '−'}{abs(value) * 100:.1f}pp"
 
 
 def delta_color(value: float) -> str:
+    """Green / amber / red for a drop. The bands are judgements, and they are:
+    within 2 points is noise, 10 points is a warning, worse than that is a
+    detector you should not rely on under that transform."""
     if value is None or value != value:
         return T.TEXT_FAINT
     if value >= -0.02:
@@ -92,6 +102,11 @@ class InsightsPage(QWidget):
         lay.addLayout(self.grid, 1)
 
     def refresh(self, charts: bool = True):
+        """Re-read the metrics; redraw the figures only when asked.
+
+        `charts=False` is the slider-drag path: the cards are cheap, the three
+        matplotlib redraws are not.
+        """
         app = self.app
         if app.result is None or not app.dataset.has_labels:
             for card in (self.card_acc, self.card_auc, self.card_f1, self.card_fpr):
@@ -106,19 +121,25 @@ class InsightsPage(QWidget):
             self._draw_charts()
 
     def _update_cards(self):
+        """The four headline numbers at the current threshold."""
         app = self.app
         m = M.compute_metrics(*app.result.valid_pairs(app.dataset), app.threshold)
         self.card_acc.set_value(M.fmt(m.accuracy), f"{m.tp + m.tn} of {m.n}")
         self.card_auc.set_value(M.fmt(m.auc, pct=False), "")
         self.card_f1.set_value(M.fmt(m.f1, pct=False),
                                f"P {m.precision:.2f}   R {m.recall:.2f}")
+        # false positives as a count, not a rate: "6 of 100 real images" is the
+        # sentence someone acts on, and it turns red past 10%
         self.card_fpr.set_value(
             f"{m.fp}", f"of {m.tn + m.fp} real",
             color=T.BAD if (m.fpr == m.fpr and m.fpr > 0.10) else T.TEXT)
 
     def _draw_charts(self):
+        """Histogram, ROC and confusion matrix from the current state."""
         app = self.app
         y, s = app.result.valid_pairs(app.dataset)
+        # a partly labeled folder still has scores for the rest; they get their
+        # own grey hump on the histogram rather than being dropped
         unlabeled = [sc for it, sc in zip(app.dataset.items, app.result.scores)
                      if it.label is None and not math.isnan(sc)]
         self.chart_hist.plot_score_histogram(y, s, app.threshold, unlabeled)
@@ -132,11 +153,17 @@ class InsightsPage(QWidget):
 # --------------------------------------------------------------------------- #
 
 class ImagesPage(QWidget):
+    """Every prediction as a sortable table, with a preview of the selected row.
+
+    The FP and FN filters are the reason this page exists: they turn "86%
+    accurate" into the fourteen specific pictures the model got wrong.
+    """
+
     def __init__(self, app, parent=None):
         super().__init__(parent)
         self.app = app
         self._filter = FILTER_ALL
-        self._selected = -1
+        self._selected = -1               # dataset index shown in the preview
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -167,9 +194,12 @@ class ImagesPage(QWidget):
 
         split = QSplitter(Qt.Orientation.Horizontal)
         self.model = ResultsModel(app)
+        # the proxy sorts only. Filtering is done by rebuilding the model's row
+        # list, because the filters depend on the live threshold and a proxy
+        # would have to be invalidated on every slider step anyway.
         self.proxy = QSortFilterProxyModel(self)
         self.proxy.setSourceModel(self.model)
-        self.proxy.setSortRole(Qt.ItemDataRole.UserRole)
+        self.proxy.setSortRole(Qt.ItemDataRole.UserRole)   # the numeric sort key
 
         self.table = QTableView()
         self.table.setModel(self.proxy)
@@ -194,6 +224,7 @@ class ImagesPage(QWidget):
         lay.addWidget(split, 1)
 
     def _build_preview(self) -> QWidget:
+        """The right-hand pane: the picture, its score, its name, its metadata."""
         card = Card(padding=16)
         card.setMinimumWidth(250)
         lay = card.layout()
@@ -227,24 +258,31 @@ class ImagesPage(QWidget):
         return card
 
     def set_filter(self, idx: int):
+        """All / FP / FN / AI / Real. The chips are mutually exclusive."""
         self._filter = idx
         for i, chip in enumerate(self.chips):
             chip.setChecked(i == idx)
         self.refresh()
 
     def _on_row_clicked(self, index):
+        # the click arrives in proxy coordinates; map back before asking the
+        # model which dataset item this row is
         src = self.proxy.mapToSource(index)
         di = self.model.data(self.model.index(src.row(), 0), ROLE_INDEX)
         if di is not None:
             self.show_preview(int(di))
 
     def refresh(self, charts: bool = False):
+        """Re-apply the filter at the current threshold and rebuild the rows."""
         app = self.app
         if app.dataset is None:
             self.model.set_rows([])
             self.count_label.setText("")
             return
 
+        # FP/FN need both a label and a score; AI/Real need only a score. An
+        # unlabeled or unscored image therefore drops out of the error filters
+        # but still appears under All.
         rows = []
         for di, item in enumerate(app.dataset.items):
             score = app.score_at(di)
@@ -270,6 +308,11 @@ class ImagesPage(QWidget):
             self.show_preview(self._selected)
 
     def show_preview(self, di: int):
+        """Load dataset item `di` into the preview pane.
+
+        Full resolution here, unlike the gallery: it is one image at a time and
+        scaled to fit, so decoding it properly costs nothing noticeable.
+        """
         app = self.app
         if app.dataset is None or di >= len(app.dataset.items):
             return
@@ -395,6 +438,12 @@ class SeverityScale(QWidget):
 
 
 class RobustnessPage(QWidget):
+    """Controls on the left, the degradation curve and cell table on the right.
+
+    Displays whatever is in app.robustness, which is either a sweep this page
+    just ran or a robustness_report.json that was sitting next to the data.
+    """
+
     def __init__(self, app, parent=None):
         super().__init__(parent)
         self.app = app
@@ -406,6 +455,7 @@ class RobustnessPage(QWidget):
         lay.addWidget(self._build_results(), 1)
 
     def _build_controls(self) -> QWidget:
+        """Transform checkboxes, the severity scale, sample options, Run/Cancel."""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -425,6 +475,8 @@ class RobustnessPage(QWidget):
             box.spec = spec
             levels = "   ".join(f"{i}: {spec.label_for(i)}" for i in range(1, 6))
             box.setToolTip(f"{spec.description}\n\nSeverities:   {levels}")
+            # the three most informative defaults: the codec everything goes
+            # through, the filter that kills high frequencies, and the resize
             box.setChecked(spec.key in ("jpeg", "blur", "rescale"))
             box.toggled.connect(self._sync_scale)
             gl.addWidget(box)
@@ -500,6 +552,7 @@ class RobustnessPage(QWidget):
                 f"  =  {cells} cells, plus the clean baseline.")
 
     def _build_results(self) -> QWidget:
+        """Summary cards, the degradation chart, and the per-cell table."""
         panel = QWidget()
         lay = QVBoxLayout(panel)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -541,11 +594,17 @@ class RobustnessPage(QWidget):
                 for severity in levels]
 
     def set_busy(self, busy: bool, message: str = ""):
+        """Swap Run for Cancel and show the sweep's live status line.
+
+        This page gets no loading overlay - it is the one cancellable job, and a
+        scrim over the window would bury the Cancel button.
+        """
         self.run_btn.setEnabled(not busy and self.app.dataset is not None)
         self.cancel_btn.setEnabled(busy)
         self.status.setText(message)
 
     def refresh(self, charts: bool = True):
+        """Draw whatever sweep data exists, or explain that there is none yet."""
         app = self.app
         view = app.robustness or {}
         series = view.get("series", {})
@@ -567,6 +626,9 @@ class RobustnessPage(QWidget):
         self._fill_table(view.get("cells", []), baseline)
 
     def _fill_table(self, cells, baseline):
+        """Fill the cell table and the four summary cards from one pass."""
+        # sorting off while filling: with it on, each inserted row would be
+        # re-sorted and the ones still being written would move under the writer
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(cells))
         deltas = []
@@ -589,10 +651,11 @@ class RobustnessPage(QWidget):
         self.card_base.set_value(M.fmt(baseline), "untouched images")
         self.card_cells.set_value(str(len(cells)), "transform x severity")
 
+        # NaN cells are shown in the table but cannot be ranked or averaged
         valid = [(d, c) for d, c in deltas if d == d]
         if not valid:
             return
-        valid.sort(key=lambda t: t[0])
+        valid.sort(key=lambda t: t[0])      # most negative delta first = worst
         worst_d, worst = valid[0]
         self.card_worst.set_value(
             M.fmt(worst.get("accuracy")),

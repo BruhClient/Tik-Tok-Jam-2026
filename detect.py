@@ -27,6 +27,10 @@ Output is the required format:
 threshold only affects what gets printed, never what gets written.
 
 Visualise any of it with:  python gui.py <dir>   or   python gui.py <out.json>
+
+This file is only argument handling and printing. Every piece of real work -
+scanning, label inference, loading the model, scoring - lives in app/runner.py,
+which the GUI calls the same way, so the two can never disagree about a number.
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ import argparse
 import os
 import sys
 
+# run from anywhere: `python /some/where/detect.py` must still find app/
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app import metrics as M                                      # noqa: E402
@@ -42,6 +47,7 @@ from app import runner                                            # noqa: E402
 from app.detectors import available_detectors                     # noqa: E402
 from app.export import export_predictions_json, export_run_report  # noqa: E402
 
+#: scan, load, score, write, results - the headings printed as [n/5]
 TOTAL_STEPS = 5
 
 
@@ -58,7 +64,8 @@ def parse_args(argv=None):
     ap.add_argument("--detector", "-d", default=None,
                     help="registered detector name (default: best available)")
     ap.add_argument("--weights", "-w", default=None,
-                    help="checkpoint to load (default: models/model.pt)")
+                    help="checkpoint to load (default: the backend's own, "
+                         "e.g. models/bundle.pt)")
     ap.add_argument("--threshold", "-t", type=float, default=None,
                     help="decision threshold for the printed summary "
                          "(default: the detector's own operating point, or 0.5)")
@@ -87,6 +94,7 @@ def _report(exc: SystemExit) -> int:
 
 
 def list_detectors() -> int:
+    """--list-detectors: every backend, and whether it can currently run."""
     for cls in available_detectors():
         tag = (f"  [no checkpoint at {cls.default_weights}]"
                if cls.requires_weights and not cls.is_ready() else "")
@@ -97,6 +105,7 @@ def list_detectors() -> int:
 
 
 def main(argv=None) -> int:
+    """Returns a process exit code: 0 on success, 2 for anything user-fixable."""
     args = parse_args(argv)
 
     if args.list_detectors:
@@ -109,6 +118,7 @@ def main(argv=None) -> int:
 
     runner.QUIET = args.quiet
     try:
+        # steps 1-3: scan, load the detector, score
         dataset, result = runner.run_directory(
             args.directory, args.detector, args.weights, total_steps=TOTAL_STEPS)
     except SystemExit as exc:
@@ -128,6 +138,8 @@ def main(argv=None) -> int:
     # value. Only the printed summary moves - the JSON is always raw scores.
     threshold = args.threshold if args.threshold is not None else result.threshold
 
+    # step 4: the deliverable. Written before the summary, so a slow metrics
+    # print can never sit between a finished run and the file it produced.
     runner.step(4, TOTAL_STEPS, "writing")
     n = export_predictions_json(args.out, dataset, result, relative=args.relative)
     runner.log(f"{n:,} predictions -> {os.path.abspath(args.out)}", indent=6)
@@ -138,6 +150,8 @@ def main(argv=None) -> int:
     runner.summarize(dataset, result, threshold,
                      total_steps=TOTAL_STEPS, step_no=5)
 
+    # Informational only, and only where it is meaningful: an unlabeled folder
+    # has no F1 to maximise. It does not move the threshold or the JSON.
     if args.best_threshold and dataset.has_labels:
         y, s = result.valid_pairs(dataset)
         best = M.best_threshold(y, s, "f1")

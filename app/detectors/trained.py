@@ -5,8 +5,8 @@ checkpoint at models/model.pt (or pass --weights) and it is ready to run.
 clip_head sorts ahead of it while models/bundle.pt is there, so ask for this
 one by name:
 
-    python detect.py <dir> --detector trained          uses models/model.pt
-    python detect.py <dir> --detector trained         --weights runs/best.pt                         uses that instead
+    python detect.py <dir> --detector trained                     models/model.pt
+    python detect.py <dir> --detector trained -w runs/best.pt     that file
 
 Two checkpoint shapes load with no code changes:
 
@@ -35,6 +35,10 @@ from .base import Detector, register
 # Match these to the training pipeline.
 # --------------------------------------------------------------------------- #
 
+# These four are the usual defaults, not a guess that is guaranteed right for
+# your checkpoint. A model trained at 256, or on CLIP's constants rather than
+# ImageNet's, will still run and quietly score badly - which is the failure mode
+# to look for first if a known-good model gives you AUC near 0.5.
 INPUT_SIZE = 224                                  # square resize before the model
 MEAN = (0.485, 0.456, 0.406)                      # ImageNet normalisation
 STD = (0.229, 0.224, 0.225)
@@ -80,10 +84,11 @@ class TrainedDetector(Detector):
         super().__init__()
         self.model = None
         self.device = None
-        self._torch = None
+        self._torch = None    # the module, held so inference need not re-import
 
     # -- lifecycle ---------------------------------------------------------
     def load(self) -> None:
+        """Read the checkpoint, move it to the best device, put it in eval mode."""
         path = self.resolve_weights(self.weights)
         if not path or not os.path.isfile(path):
             raise SystemExit(
@@ -104,7 +109,12 @@ class TrainedDetector(Detector):
         self.model = model.to(self.device)
 
     def _load_checkpoint(self, torch, path: str):
-        """TorchScript first, then a pickled module, then build_model()."""
+        """TorchScript first, then a pickled module, then build_model().
+
+        In that order because it goes from most self-contained to least: a
+        TorchScript file needs nothing from this project, a pickle needs its
+        defining class importable, and a bare state_dict needs code written.
+        """
         try:
             return torch.jit.load(path, map_location="cpu")
         except Exception:
@@ -145,6 +155,7 @@ class TrainedDetector(Detector):
                          "which is not a model")
 
     def unload(self) -> None:
+        """Drop the model and let the allocator reclaim it."""
         self.model = None
 
     # -- inference ---------------------------------------------------------
@@ -176,16 +187,27 @@ class TrainedDetector(Detector):
         return self._to_scores(out)
 
     def _to_array(self, img: Image.Image) -> np.ndarray:
+        """PIL image -> normalised CHW float array, per the constants above.
+
+        A square resize, not resize-shortest-side plus centre crop: it distorts
+        the aspect ratio but keeps the whole frame, which is what most
+        classification training pipelines do. Change it if yours did not.
+        """
         img = img.convert("RGB").resize((INPUT_SIZE, INPUT_SIZE), Image.BILINEAR)
         arr = np.asarray(img, dtype=np.float32) / 255.0
         arr = (arr - np.array(MEAN, dtype=np.float32)) / np.array(STD, dtype=np.float32)
         return arr.transpose(2, 0, 1)             # HWC -> CHW
 
     def _to_scores(self, out) -> list:
-        """Squash whatever the head emits into P(AI) per image."""
+        """Squash whatever the head emits into P(AI) per image.
+
+        Covers the three shapes a classifier head actually returns: (B,) and
+        (B, 1) are one logit through a sigmoid, (B, C) is class logits through a
+        softmax read at AI_CLASS_INDEX.
+        """
         torch = self._torch
         if isinstance(out, (tuple, list)):
-            out = out[0]
+            out = out[0]              # models that also return features/aux heads
         out = out.detach().float().cpu()
         if out.ndim == 1:                         # one logit per image
             probs = torch.sigmoid(out)

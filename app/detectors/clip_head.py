@@ -49,7 +49,10 @@ from .base import Detector, register
 # Constants that must match the training pipeline (clipfeat.py).
 # --------------------------------------------------------------------------- #
 
+#: CLIP ViT-L/14's input resolution. Fixed by the patch embedding, not a knob.
 RES = 224
+#: CLIP's own normalisation constants. These are NOT ImageNet's - the numbers
+#: are close enough to look like a typo and far enough to move every score.
 CLIP_MEAN = (0.48145466, 0.45782750, 0.40821073)
 CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 
@@ -69,9 +72,11 @@ SOURCE_JPEG_Q = 92
 MAX_PIXELS = 200_000_000
 Image.MAX_IMAGE_PIXELS = None
 
+#: the bundle. Present -> this backend becomes the default everywhere.
 DEFAULT_WEIGHTS = os.path.join("models", "bundle.pt")
 
 
+#: built on first use inside _head_class, so importing this module needs no torch
 _HEAD_CLS = None
 
 
@@ -118,7 +123,7 @@ def _head_class(torch):
 
 @register
 class ClipHeadDetector(Detector):
-    name = "clip_head"
+    name = "clip_head"                          # --detector clip_head
     display_name = "CLIP ViT-L/14 + MLP head"
     description = (
         "Frozen CLIP ViT-L/14 embeddings scored by an MLP head trained "
@@ -134,10 +139,10 @@ class ClipHeadDetector(Detector):
 
     def __init__(self):
         super().__init__()
-        self.clip = None
-        self.head = None
+        self.clip = None          # the frozen vision tower
+        self.head = None          # the trained MLP
         self.device = None
-        self._torch = None
+        self._torch = None        # the module, held so inference need not re-import
         # filled from the bundle at load()
         self.mu = self.sd = None
         self.platt_a, self.platt_b = 1.0, 0.0
@@ -148,6 +153,12 @@ class ClipHeadDetector(Detector):
 
     # -- lifecycle ---------------------------------------------------------
     def load(self) -> None:
+        """Read the bundle and build both halves of the model.
+
+        Every failure here raises SystemExit with a message a user can act on,
+        because there is nothing this class can do about a missing file or a
+        missing dependency and a traceback would only bury the reason.
+        """
         path = self.resolve_weights(self.weights)
         if not path or not os.path.isfile(path):
             raise SystemExit(
@@ -175,6 +186,7 @@ class ClipHeadDetector(Detector):
         size_gb = os.path.getsize(path) / 1e9
         self.note(f"reading {os.path.basename(path)} ({size_gb:.2f} GB) from disk")
         bundle = torch.load(path, map_location="cpu", weights_only=False)
+        # fail on the file, not on the first missing key three steps later
         missing = {"clip_config", "clip_state_dict", "head_state_dict",
                    "head_dim", "mu", "sd"} - set(bundle)
         if missing:
@@ -182,6 +194,8 @@ class ClipHeadDetector(Detector):
                 f"error: {path} is not a detector bundle - missing "
                 f"{', '.join(sorted(missing))}")
 
+        # the preprocessing and calibration the head was trained under. Defaults
+        # match the current training config; a bundle that disagrees wins.
         self.feature = bundle.get("feature", "proj")
         self.preproc = bundle.get("preproc", "resize")
         self.l2 = bool(bundle.get("l2", True))
@@ -202,7 +216,7 @@ class ClipHeadDetector(Detector):
                   f" · moving to {str(self.device).upper()}")
         clip.eval().to(self.device)
         for p in clip.parameters():
-            p.requires_grad_(False)
+            p.requires_grad_(False)   # inference only; also keeps memory down
         self.clip = clip
 
         hc = bundle.get("head_config") or {}
@@ -216,6 +230,8 @@ class ClipHeadDetector(Detector):
         head.eval().to(self.device)
         self.head = head
 
+        # per-dimension feature standardisation, fitted on the training features.
+        # On-device so the normalisation does not bounce back to the CPU.
         self.mu = torch.as_tensor(bundle["mu"], dtype=torch.float32).to(self.device)
         self.sd = torch.as_tensor(bundle["sd"], dtype=torch.float32).to(self.device)
 
@@ -229,12 +245,19 @@ class ClipHeadDetector(Detector):
                   f" · operating point {self.default_threshold:.3f}")
 
     def unload(self) -> None:
+        """Drop the tower and the head. ~1.2 GB of the process goes with them."""
         self.clip = None
         self.head = None
         self.mu = self.sd = None
 
     # -- inference ---------------------------------------------------------
     def predict_batch(self, paths: list) -> list:
+        """Score files. Unreadable ones come back NaN, in their original slot.
+
+        `keep` carries the mapping: the failures are dropped before the forward
+        pass and their scores are written back by index, so the returned list is
+        always the same length as `paths` and never shifted.
+        """
         images, keep = [], []
         for i, p in enumerate(paths):
             img = self._open(p)
@@ -257,10 +280,13 @@ class ClipHeadDetector(Detector):
         batch = torch.from_numpy(
             np.stack([self._to_clip_array(img) for img in images])).to(self.device)
 
+        # no_grad: nothing here is trained, and the graph would cost memory
         with torch.no_grad():
             feats = self._embed(batch)
-            if self.l2:
+            if self.l2:                       # 1e-8 guards a zero-norm feature
                 feats = feats / (feats.norm(dim=-1, keepdim=True) + 1e-8)
+            # exactly the training order: L2-normalise, then standardise.
+            # Swapping the two changes every feature the head sees.
             feats = (feats - self.mu) / self.sd
             logits = self.head(feats)             # (B,), the head squeezes
             probs = torch.sigmoid(self.platt_a * logits + self.platt_b)
