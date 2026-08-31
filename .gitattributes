@@ -1,2 +1,4 @@
 # Keep line endings consistent for everyone working on this project
 * text=auto
+Tik-Tok-Jam-2026/models filter=lfs diff=lfs merge=lfs -text
+Tik-Tok-Jam-2026/models/bundle.pt filter=lfs diff=lfs merge=lfs -text
