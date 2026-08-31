@@ -1,58 +1,48 @@
 """
-Bundle a trained head + CLIP into one self-contained, portable file.
+Minimal example: load an exported bundle and score images with it.
 
-This does NOT pickle the whole live model (that would mean saving a class
-reference, not just data -- see clipfeat.export_clip_bundle's docstring for
-why that specific distinction is the actual safety line, not "how much" is
-in the file). Everything here is plain data: config dicts, state_dicts,
-numbers, strings. That's what makes it safe to reload with weights_only=True,
-and it's what makes the result genuinely portable -- no HuggingFace cache,
-no network access needed to use it on another machine.
+This is the consumer side of export_bundle.py. A bundle is plain data (config
+dicts, state_dicts, numbers), so nothing here needs a HuggingFace cache or any
+network access -- point it at a bundle.pt and a folder and it prints verdicts.
 
-    python export_bundle.py --ckpt runs/cvar/head.pt --out runs/cvar/bundle.pt
+    python load_bundle_example.py --bundle runs/cvar/bundle.pt --folder some/images
 
-Load it back with clipfeat.load_clip_from_bundle() instead of load_clip() --
-see load_bundle_example.py for the minimal inference pattern.
+The Detector class in detector.py already wraps the whole load-and-score path
+(re-encode -> CLIP embed -> head -> Platt -> threshold), so the "minimal
+pattern" really is: construct it once, call predict_folder. Reach for the
+lower-level clipfeat.load_clip_from_bundle() only if you need the raw tower.
 """
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
-import torch
-
-import clipfeat as CF
+from detector import Detector
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", required=True, help="an existing head.pt from train.py")
-    ap.add_argument("--out", required=True, help="where to write the combined bundle")
+    ap.add_argument("--bundle", required=True, help="a bundle.pt from export_bundle.py")
+    ap.add_argument("--folder", required=True, help="a folder of images to score")
+    ap.add_argument("--limit", type=int, default=10,
+                    help="how many per-image results to print (default: 10)")
     args = ap.parse_args()
 
-    ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    print(f"[export] loading CLIP ({ck['clip_model']}) to bundle its weights...")
-    model, _ = CF.load_clip(ck["clip_model"], device="cpu")
+    # loads the tower + head from the bundle once; no network access needed
+    det = Detector(args.bundle)
 
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
+    results = det.predict_folder(args.folder)
+    if not results:
+        print(f"no images found under {args.folder}")
+        return
 
-    torch.save({
-        "clip_config": model.config.to_dict(),
-        "clip_state_dict": model.state_dict(),
-        "clip_model_name": ck["clip_model"],   # kept for reference/logging only
-        "head_state_dict": ck["state_dict"],
-        "head_dim": ck["dim"],
-        "head_config": ck["config"],
-        "mu": torch.as_tensor(ck["mu"]), "sd": torch.as_tensor(ck["sd"]),
-        "threshold": ck["threshold"],
-        "platt_a": ck.get("platt_a", 1.0), "platt_b": ck.get("platt_b", 0.0),
-        "feature": ck["feature"], "preproc": ck["preproc"], "l2": ck["l2"],
-    }, out)
+    for r in results[:args.limit]:
+        print(f"  {r['verdict']:5s}  p(fake)={r['probability_fake']:.3f}  {r['path']}")
+    if len(results) > args.limit:
+        print(f"  ... and {len(results) - args.limit} more")
 
-    print(f"[export] wrote {out} ({out.stat().st_size/1e6:.0f} MB)")
-    print("[export] plain data only (config dicts + state_dicts) -- "
-         "loadable with torch.load(..., weights_only=True)")
+    s = det.summary(results)
+    print(f"\n{s['total']} images  ->  {s['fake']} fake, {s['real']} real, "
+          f"{s['errors']} errors")
 
 
 if __name__ == "__main__":
