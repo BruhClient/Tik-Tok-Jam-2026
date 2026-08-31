@@ -24,6 +24,7 @@ the data side is the corpus the training consumed — see
 - [Model provenance](#model-provenance)
 - [Building the corpus](#building-the-corpus)
 - [The model](#the-model)
+- [Where the model works and where it stops](#where-the-model-works-and-where-it-stops)
 - [Two kinds of input](#two-kinds-of-input)
 - [Output format](#output-format)
 - [The robustness sweep](#the-robustness-sweep)
@@ -121,6 +122,13 @@ python gui.py <image_directory>   # score that folder on launch
 python gui.py predictions.json    # open a finished result file
 ```
 
+On the upload screen the folder can be dragged onto the window instead of
+browsed for. Drop a folder to score it, a `predictions.json` to open a finished
+run, or a handful of loose images to use the folder they sit in - a folder is
+the unit this app scores, so the whole of it is read either way. Declaring
+labelled or unlabelled first still gates the folder, exactly as it gates the
+Browse button.
+
 ---
 
 ## Model provenance
@@ -131,6 +139,27 @@ pipeline — feature extraction (`clipfeat.py`), the augmentation stack
 Joe's upstream repository, and this project consumes its output.
 
 > **Upstream training repository:** _add the link to Joe's repo here_
+
+**What upstream actually trains is a head, and nothing else.** The CLIP
+ViT-L/14 vision tower (~303M parameters) is frozen; a ~0.7M-parameter MLP
+(768 -> 512 -> 256 -> 1, BatchNorm, dropout 0.3) is fitted on its cached
+embeddings. Freezing is the point, not a shortcut: fine-tuning 303M parameters
+on ~21k images would overfit away the general representation that gives
+cross-generator robustness, and caching the embeddings once is what made ~20
+training experiments affordable instead of three.
+
+**The "adversarial" half is a degradation sampler, not a generator.** Upstream
+draws k cached views per image from the post-processing space
+(crop -> resize -> colour -> noise -> blur -> JPEG) and backpropagates through
+the worst-scoring ones (`--adv-mode cvar`), then early-stops on the *worst*
+view's AUROC rather than the clean one. `robustness.py` in this repo measures
+exactly what that objective was built for, which is why the two belong
+together.
+
+The current upstream checkpoint is `runs/k2m/head_bal.pt`: 21,400 training
+images (7,150 real / 14,250 generated) across nine source groups, with
+validation held at exactly 50/50 because the operating point is derived from it
+and inherits any skew in it directly.
 
 What crosses the boundary is a single file: `models/bundle.pt`. Everything the
 detector needs travels inside it (tower config and weights, head config and
@@ -163,6 +192,21 @@ load time and printed in the run log:
 Point at either with `--weights models/bundle_cvar.pt`. Never hardcode an
 operating point from this table into anything: read it from the bundle, which is
 what the app does.
+
+**Why it has to be read rather than typed.** A bundle stores its operating
+point as a **raw logit**; everything user-facing here is a probability. The
+conversion is not `sigmoid(logit)` — it has to go through the bundle's own
+Platt coefficients:
+
+```
+P = sigmoid(platt_a * logit + platt_b)
+```
+
+On upstream's `k2m` model that is `sigmoid(1.3104 * -0.0296 + 0.2205) = 0.545`,
+where the naive `sigmoid(-0.0296)` gives `0.493`. A 0.05 shift, in exactly the
+direction that manufactures false positives, out of a system that otherwise
+looks entirely plausible. `clip_head.py` does the full conversion at load and
+prints the result — that is the number the run log calls `operating point`.
 
 ---
 
@@ -220,6 +264,44 @@ generalisation claim from being circular:
 
 A held-out generator only means something if it was never in the pool, so the
 separation is enforced at ingest time rather than remembered later.
+
+### The shortcuts this is defending against
+
+Upstream audited every candidate dataset before training on it and found that
+**four of five contained a shortcut** — some property that separates the two
+classes for reasons unrelated to generation. The failure is silent: validation
+accuracy goes *up*, not down. Four kinds turned up, and they map onto what an
+ingest step can and cannot fix:
+
+| shortcut | how it showed up | fixed at ingest? |
+| --- | --- | --- |
+| **Format** — PNG generations vs JPEG photographs | one set was 100% PNG fakes against 100% JPEG reals | **yes** — the single re-encode quality above |
+| **Geometry** — generators emit squares, cameras do not | `width == height` alone scored 98.6% on one dataset | upstream only, by random square crop + resize on *both* classes |
+| **Resolution history** — 256px reals against 1024px fakes | an upscaled 256px image stays soft; a downscaled 1024px one does not | **no** — equalising the output size does not undo the resampling |
+| **Content distribution** — prompted, aesthetic subjects vs candid snapshots | one real corpus becomes a proxy for "real" | **no** — only covered, by mixing corpora |
+
+The third is the cautionary one. A 130k-image pool passed its audit, trained
+cleanly, and scored **0.5547 AUROC — chance** on a held-out set from a different
+source. *Equalising a measurable property does not equalise the process that
+produced it*, and only a test set from an unrelated source catches the
+difference. That is why `heldout/` is a separate ingest destination here rather
+than a slice taken out of the pool afterwards.
+
+The fourth has a positive result attached, and it is worth reading before adding
+another source to `run_worker.sh`. Adding *more conventional web photography* as
+reals (MS COCO, OpenImages) made every content category worse; adding ~3,000
+professionally-shot stock photographs made every one better — city +0.157, food
++0.192, people +0.199 AUROC. It is **stylistic** diversity in the real class
+that pays, not corpus count. More of the same kind of real image only deepens a
+region already occupied.
+
+One methodological warning comes with it. Upstream rejected a dataset for
+scoring 0.6246 standalone against its in-distribution test set, then reinstated
+it when judged on the content categories instead — where it produced the best
+model in the project (animals +0.076 AUROC). A single held-out set is not a
+neutral arbiter if its own composition is narrow along an axis you are not
+controlling for: that test set was narrow in *generator*, the category sets are
+narrow in *content*. Neither alone decides a dataset.
 
 ### Pulling it in parallel
 
@@ -297,6 +379,56 @@ why they cannot see subtle resampling traces. The flip side shows up in the
 sweep: heavy compression shifts *both* classes' scores upward, so a fixed
 threshold drifts even where AUROC holds. Read the Robustness page with that in
 mind.
+
+---
+
+## Where the model works and where it stops
+
+Upstream benchmarks the head on content-category sets it never trained on
+(~200 images each, 50 generated / 150 real) plus a small ChatGPT set. Balanced
+accuracy is the headline because those sets are 1:3 — labelling everything
+"real" scores 75% raw.
+
+| benchmark | AUROC | balanced acc | FPR at the deployed point |
+| --- | --- | --- | --- |
+| in-distribution test set | 0.9639 | — | — |
+| city | 0.9885 | 0.9600 | 4.7% |
+| food | 0.9844 | 0.9500 | 2.0% |
+| animals | 0.9634 | 0.8786 | 18.9% |
+| people | 0.8355 | 0.7510 | 24.5% |
+| ChatGPT / GPT-4o | 0.7333 | 0.6278 | 44.4% |
+
+Three things there change how you should read anything this repo prints.
+
+**Recall is high everywhere; the false-positive rate is not.** Across those
+categories recall stays between 76% and 98% — the model does catch generated
+images. What swings by an order of magnitude is how many *authentic*
+photographs it flags alongside them: 2% on food, 24.5% on people. No single
+global threshold serves all four, so the honest deployment answer is per-domain
+calibration — and on a labeled folder `--best-threshold` is the cheap version
+of it.
+
+**Cross-family generator transfer fails.** Holding a whole generator out of
+training costs almost nothing *within* the diffusion family: held-out FLUX_DEV
+scored 0.8894 against 0.8963 / 0.8929 for generators that were in training, a
+0.007 gap. Across families it does not work at all. GPT-4o images score 0.7333
+AUROC, and adding DALL·E 3 to training as the closest available proxy did not
+fix it. Treat any generator architecturally unlike the training set as
+**undetected until measured**. (That ChatGPT figure is 19 images; it
+establishes "not working", not a number.)
+
+**The weak categories are not a resolution problem.** The obvious hypothesis —
+that CLIP's 224px downsampling destroys the fine texture animal and nature
+subjects depend on — was tested directly upstream, by training a full model on
+native-resolution 224px crops instead of the whole image resized. It did not
+help animals, and it cost city and food ~0.065 AUROC each. Global scene
+composition carries more signal here than fine texture, which makes the resize
+in `clip_head.py` an evidenced choice rather than an unexamined default. The
+animals and people weakness itself remains unexplained.
+
+The category sets are ~200 images and the ChatGPT set is 19, so differences
+below about 0.03 AUROC are noise. Every number is also a snapshot against
+today's generators.
 
 ---
 
@@ -390,6 +522,21 @@ Ordering matters and is deliberate: the detector's own `prepare_source()` runs
 and degraded second. Reversing them measures a pipeline the model was never
 trained under.
 
+**Known weak spots, from upstream's own grid.** Three conditions stand out, and
+all three are high-FPR failures on inputs that sit deliberately outside the
+training ranges: heavy downscaling (0.790 accuracy at 0.125x), a
+thumbnail-then-crop chain (0.800 accuracy, 31.9% FPR), and **WebP at q50**
+(0.802, 36.2% FPR) — an unseen codec. `rescale`, `social` and `webp` are the
+rows to read first. Upstream measured that grid on its in-distribution test set
+only, so whether the weak *content* categories degrade further under
+compression and blur is unknown; running this sweep on a labeled category
+folder is how you find out.
+
+The threat model is **incidental** degradation — what happens to a picture
+between upload and screen. Nothing here is claimed against an adaptive
+adversary optimising perturbations against this specific detector, which is a
+different and much harder problem.
+
 The report lands at `<dir>/robustness_report.json`, and `gui.py` picks up a
 report sitting next to the data automatically.
 
@@ -443,6 +590,24 @@ re-measured on this table. Reproduce it for whichever bundle you are shipping:
 python detect.py sample_data --best-threshold --report run_report.json
 python detect.py sample_data --weights models/bundle_cvar.pt --best-threshold
 ```
+
+### Agreement with the upstream pipeline
+
+Upstream scored its `k2m` model both ways — through its own evaluation code and
+through this repo's — on the four content categories:
+
+| category | upstream benchmark AUROC | this pipeline | delta |
+| --- | --- | --- | --- |
+| food | 0.9844 | 0.983 | 0.001 |
+| animals | 0.9634 | 0.960 | 0.003 |
+| city | 0.9885 | 0.990 | 0.002 |
+| people | 0.8355 | 0.836 | 0.000 |
+
+TPR and FPR matched exactly on food (0.920 / 0.020), including the
+`subsampling=2` detail. The one deliberate divergence is `SOURCE_JPEG_Q`:
+training drew a random quality in 85-98, this repo pins 92 so that two scans of
+the same image cannot disagree with each other. That is worth <=0.004 AUROC,
+against score margins of 3.2-6.0.
 
 ---
 
@@ -609,10 +774,15 @@ mid-way.
 ## Credits
 
 - Training pipeline, weights and calibration — Joe's upstream repository (see
-  [Model provenance](#model-provenance)).
+  [Model provenance](#model-provenance)); current checkpoint
+  `runs/k2m/head_bal.pt`.
 - Vision tower — `openai/clip-vit-large-patch14`, frozen, redistributed inside
   the bundle.
-- Training corpus — pooled from public datasets by `tools/build_dataset.py`:
+- Training corpus — the shipped bundle carries upstream's own nine-group mix
+  (reals: an original Kaggle set, Unsplash, `ai-vs-human`; generated: a
+  GenImage-derived group, SDXL, FLUX_DEV, FLUX_PRO, DALL-E 3, `ai-vs-human`),
+  which is **not** the pool built in this repo. The pool below is what
+  `tools/build_dataset.py` assembles for retraining:
   Tiny-GenImage, SID_Set, CIFAKE, ELSA1M, OpenImages V7, and the `bitmind`
   real/generator collections (MS-COCO, FFHQ, CelebA-HQ, SDXL, RealVis-XL,
   Mobius, FLUX.1-dev). Each remains under its own licence.
