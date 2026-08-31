@@ -30,7 +30,7 @@ head training, evaluation and the bundle export.
   - [What we trained](#what-we-trained)
     - [Datasets and their numbers](#datasets-and-their-numbers)
     - [The training objective](#the-training-objective)
-    - [The shipped bundles](#the-shipped-bundles)
+    - [The shipped bundle](#the-shipped-bundle)
   - [Reproducing the results](#reproducing-the-results)
     - [A. Inference only (you have `models/bundle.pt`)](#a-inference-only-you-have-modelsbundlept)
     - [B. The full training pipeline, from scratch](#b-the-full-training-pipeline-from-scratch)
@@ -165,7 +165,7 @@ Everything prints progress to the terminal — in the GUI too.
 ```bash
 python detect.py <dir>
 python detect.py <dir> --best-threshold --report run_report.json
-python detect.py <dir> --out results.json --weights models/bundle_cvar.pt
+python detect.py <dir> --out results.json --weights models/bundle.pt
 python detect.py <dir> --tta 4                   # average 4 views per image
 python detect.py <dir> --require-labels          # fail if labels are missing
 python detect.py --list-detectors
@@ -350,21 +350,20 @@ preprocessing (`resize` vs `nativecrop`). Two are worth singling out:
   against 0.8963 / 0.8929 for generators that *were* in training — a 0.007 gap.
   Within the diffusion family, holding a generator out costs almost nothing.
 
-### The shipped bundles
+### The shipped bundle
 
 `export_bundle.py` writes plain data only — config dicts, state_dicts, numbers,
 strings — so the result reloads with `weights_only=True` and needs no
-HuggingFace cache and no network. Two bundles are present, and they are **not**
-the same model; each carries its own calibration and its own operating point,
-read out of the file at load time and printed in the run log:
+HuggingFace cache and no network. A bundle carries its own calibration and its
+own operating point, read out of the file at load time and printed in the run
+log:
 
 | bundle | training run | raw logit threshold | platt a / b | **operating point (probability)** |
 | --- | --- | --- | --- | --- |
 | `models/bundle.pt` | `runs/k2m`, cvar, warm-started from `runs/dalle/head.pt` | −0.0296 | 1.3104 / 0.2205 | **0.545** |
-| `models/bundle_cvar.pt` | `runs/cvar`, cvar, from scratch | 2.9944 | 1.2142 / −0.5958 | **0.954** |
 
-Whatever sits at `models/bundle.pt` is the default everywhere. Point at the
-other with `--weights models/bundle_cvar.pt`. Never hardcode an operating point
+Whatever sits at `models/bundle.pt` is the default everywhere; `--weights` points
+at any other checkpoint you have exported. Never hardcode an operating point
 from this table into anything: read it from the bundle, which is what the app
 does.
 
@@ -416,7 +415,6 @@ head -> logit -> sigmoid(platt_a * logit + platt_b)
 pip install -r requirements.txt
 
 python detect.py <labeled_dir> --best-threshold --report run_report.json
-python detect.py <labeled_dir> --weights models/bundle_cvar.pt --best-threshold
 
 python robustness.py <labeled_dir>              # the graded in-house grid
 python robustness.py <labeled_dir> --official   # the challenge's exact table
@@ -589,8 +587,8 @@ would be dishonest; report the deployed-threshold number.
 
 ### On the sample set
 
-Measured with **`models/bundle_cvar.pt`** on a 200-image labeled folder
-(100 real, 100 AI, clean):
+Measured with an **earlier bundle** (operating point `0.954`) on a 200-image
+labeled folder (100 real, 100 AI, clean):
 
 | | |
 | --- | --- |
@@ -996,7 +994,7 @@ can currently run.
 
 **Everything scores as AI, or everything scores as real.** Check the threshold.
 The calibrated operating point is not `0.5` — it is whatever the bundle carries
-(`0.545` for `bundle.pt`, `0.954` for `bundle_cvar.pt`), and the run log prints
+(`0.545` for the shipped `bundle.pt`), and the run log prints
 it. If you passed `--threshold 0.5` you are asking a different question. Run
 `--best-threshold`, or `calibrate.py`, to see where it should actually sit.
 
