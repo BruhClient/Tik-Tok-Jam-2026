@@ -16,19 +16,17 @@ The folder decides what you get back. Both cases always write the JSON:
              --require-labels if you expected labels and want it to fail loudly
              when the subfolders turn out to be misnamed.
 
-Output is the required format, plus two readability fields:
+Output is the required format, plus a readable verdict:
 
     [
-      {"image_path": "C:/data/img_0001.jpg", "pred": 0.8731,
-       "prediction_score": 0.8731, "prediction": "fake"},
+      {"image_path": "C:/data/img_0001.jpg", "pred": 0.8731, "prediction": "fake"},
       ...
     ]
 
-`pred` is P(AI-generated) in [0, 1], and `prediction_score` is the same number
-under a self-describing name. Scores are always raw floats - the threshold
-never changes one. `prediction` is the verdict those scores read to at the
-threshold in effect (--threshold, else the model's own operating point), which
-is the one field the threshold does move.
+`pred` is P(AI-generated) in [0, 1]. Scores are always raw floats - the
+threshold never changes one. `prediction` is the verdict that score reads to at
+the threshold in effect (--threshold, else the model's own operating point),
+which is the one field the threshold does move.
 
 Visualise any of it with:  python gui.py <dir>   or   python gui.py <out.json>
 

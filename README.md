@@ -660,15 +660,13 @@ sweep on a labeled category folder is how to find out.
 
 ## Output format
 
-`detect.py` writes what the problem statement asks for, plus two fields that
-make the file readable on its own:
+`detect.py` writes what the problem statement asks for, plus a verdict that
+makes the file readable on its own:
 
 ```json
 [
-  {"image_path": "C:/data/img_0001.jpg", "pred": 0.8731,
-   "prediction_score": 0.8731, "prediction": "fake"},
-  {"image_path": "C:/data/img_0002.png", "pred": 0.0412,
-   "prediction_score": 0.0412, "prediction": "real"}
+  {"image_path": "C:/data/img_0001.jpg", "pred": 0.8731, "prediction": "fake"},
+  {"image_path": "C:/data/img_0002.png", "pred": 0.0412, "prediction": "real"}
 ]
 ```
 
@@ -676,7 +674,6 @@ make the file readable on its own:
 | --- | --- |
 | `image_path` | absolute by default; relative to the input directory with `--relative` |
 | `pred` | **the contract** — P(AI-generated) in `[0, 1]`, rounded to 6 decimals |
-| `prediction_score` | the same number, under a self-describing name |
 | `prediction` | `"fake"` if the score is at or above the threshold, `"real"` below |
 
 Every input image gets exactly one record, in sorted path order. An image that
@@ -688,7 +685,7 @@ terminal summary rather than silently dropped, so the record count always
 matches the file count.
 
 **The scores are always raw.** The threshold moves `prediction` and nothing
-else — `pred` and `prediction_score` are identical whatever threshold is in
+else — `pred` is the same value whatever threshold is in
 effect. That threshold is `--threshold` when given, otherwise the model's own
 operating point; in the window it is the live slider value, so an export matches
 what is on screen.

@@ -7,22 +7,20 @@ Three outputs, one of which is the contract:
   * run report        metrics, timing and dataset composition, for the record
 
 predictions.json carries the deliverable format required by the problem
-statement, plus two readability fields:
+statement, plus a readable verdict:
 
     [
-      {"image_path": "...", "pred": 0.8731,
-       "prediction_score": 0.8731, "prediction": "fake"},
+      {"image_path": "...", "pred": 0.8731, "prediction": "fake"},
       ...
     ]
 
 `pred` is the contract and is never renamed, reordered away or dropped.
-`prediction_score` is the same number under a self-describing name, and
 `prediction` is that score read against a threshold.
 
 One record per input image, in scan order, whatever happened to it. The
 threshold still never changes a *score*: it is a reading of the scores, not a
-property of them, which is why `pred` and `prediction_score` are identical no
-matter what threshold is passed and only `prediction` moves.
+property of them, which is why `pred` is the same no matter what threshold is
+passed and only `prediction` moves.
 """
 
 from __future__ import annotations
@@ -45,12 +43,9 @@ def _path_for(item, root: str, relative: bool) -> str:
 
 def export_predictions_json(path: str, dataset, run, relative: bool = False,
                             nan_value: float = 0.5, threshold: float = None) -> int:
-    """Write the [{image_path, pred, prediction_score, prediction}] file.
+    """Write the [{image_path, pred, prediction}] file. Returns row count.
 
-    Returns row count.
-
-    `pred` and `prediction_score` hold the same value - the required key and a
-    self-describing alias for it. `prediction` is the verdict at `threshold`:
+    `pred` is the required score. `prediction` is the verdict at `threshold`:
     "fake" for a score at or above it, "real" below.
 
     `threshold` defaults to the detector's own calibrated operating point
@@ -77,7 +72,6 @@ def export_predictions_json(path: str, dataset, run, relative: bool = False,
         records.append({
             "image_path": _path_for(item, dataset.root, relative),
             "pred": pred,
-            "prediction_score": pred,
             "prediction": None if failed else ("fake" if raw >= thr else "real"),
         })
     with open(path, "w", encoding="utf-8") as f:
