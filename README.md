@@ -18,22 +18,38 @@ head training, evaluation and the bundle export.
 
 ## Contents
 
-- [Project overview](#project-overview)
-- [Setup and installation](#setup-and-installation)
-- [Commands](#commands)
-- [What we trained](#what-we-trained)
-  - [Datasets and their numbers](#datasets-and-their-numbers)
-  - [The training objective](#the-training-objective)
-  - [The shipped bundles](#the-shipped-bundles)
-- [Reproducing the results](#reproducing-the-results)
-- [Results](#results)
-- [Output format](#output-format)
-- [The robustness sweep](#the-robustness-sweep)
-- [The window](#the-window)
-- [Repository layout](#repository-layout)
-- [Reflection: what works, what does not, what I would do next](#reflection-what-works-what-does-not-what-i-would-do-next)
-- [Troubleshooting](#troubleshooting)
-- [Credits](#credits)
+- [AIGC Image Detector — TikTok Jam 2026](#aigc-image-detector--tiktok-jam-2026)
+  - [Contents](#contents)
+  - [Project overview](#project-overview)
+  - [Setup and installation](#setup-and-installation)
+  - [Commands](#commands)
+    - [`detect.py`](#detectpy)
+    - [`calibrate.py`](#calibratepy)
+    - [`robustness.py`](#robustnesspy)
+    - [`gui.py`](#guipy)
+  - [What we trained](#what-we-trained)
+    - [Datasets and their numbers](#datasets-and-their-numbers)
+    - [The training objective](#the-training-objective)
+    - [The shipped bundles](#the-shipped-bundles)
+  - [Reproducing the results](#reproducing-the-results)
+    - [A. Inference only (you have `models/bundle.pt`)](#a-inference-only-you-have-modelsbundlept)
+    - [B. The full training pipeline, from scratch](#b-the-full-training-pipeline-from-scratch)
+  - [Results](#results)
+    - [On the sample set](#on-the-sample-set)
+    - [Generalisation, by content category](#generalisation-by-content-category)
+    - [Agreement between the training pipeline and this repo](#agreement-between-the-training-pipeline-and-this-repo)
+    - [Known weak spots under degradation](#known-weak-spots-under-degradation)
+  - [Output format](#output-format)
+  - [The robustness sweep](#the-robustness-sweep)
+  - [The window](#the-window)
+  - [Repository layout](#repository-layout)
+    - [Data folders](#data-folders)
+  - [Reflection: what works, what does not, what I would do next](#reflection-what-works-what-does-not-what-i-would-do-next)
+    - [What worked](#what-worked)
+    - [Limitations, stated plainly](#limitations-stated-plainly)
+    - [What I would improve given more time](#what-i-would-improve-given-more-time)
+  - [Troubleshooting](#troubleshooting)
+  - [Credits](#credits)
 
 ---
 
@@ -81,7 +97,7 @@ Three ideas drove everything else:
 
 Requires **Python 3.9+**. A CUDA GPU is used automatically when torch finds
 one; CPU works and is the assumed case — CLIP ViT-L/14 scores roughly 5–15
-images a second on CPU.
+images a second on CPU for training, but very slow for evaluation. 
 
 ```bash
 git clone <this repo>
@@ -105,7 +121,7 @@ torch>=2.0     transformers>=4.40
 `transformers` is only used to *build* the CLIP tower — the weights ship inside
 the bundle, so nothing is downloaded at run time.
 
-**The model bundle is gitignored** (`models/*`, ~1.2 GB each) and is not in a
+**The model bundle is gitignored** (`models/*`, ~1.2 GB each) and is not in a ###CHECK ON THIS
 fresh clone. Put it at `models/bundle.pt` before running anything:
 
 ```bash
@@ -237,13 +253,13 @@ audits it for shortcuts, and lays it out as `real/<source>/` + `fake/<generator>
 — the structure `clipfeat.scan_dir()` reads, and the structure that gives
 `train.py --holdout-group <generator>` something real to hold out.
 
-| dataset | source | role | counts as configured |
+| dataset | source | role | counts as configured | ###CHECK ON THIS
 | --- | --- | --- | --- |
 | **SID_Set** | `saberzl/SID_Set` (HF) — reals are OpenImages photos, fakes are full-synthetic | primary train / val / test | **25,000 per class** train · **3,000 per class** val · **4,000 per class** test (`--offset 25000`, so disjoint from train) |
 | **SID_Set tampered** | same dataset, label 2 — real photos with a locally edited region + mask | **evaluation probe only, never trained on** | **2,000 per class** |
 | **Kaggle AI-vs-Human** | `alessandrasala79/ai-vs-human-generated-dataset` — CSV manifest, `0=real / 1=AI` | reals + fakes | **3,000 per class**, 15% carved out for val |
 | **Defactify / MS COCOAI** | `Rajarshi-Roy-research/Defactify_Image_Dataset` | semantically aligned pairs + per-generator labels | **3,000 per generator** train · **500 per generator** val, across **5 generators**: SD 3, SD 2.1, SDXL, DALL-E 3, MidJourney v6 |
-| **MS COCO** | cocodataset.org | training reals **and** the benchmark reals, kept strictly apart | `train2017` **118k** images → training reals (capped, e.g. `--limit 6000`) · `val2017` **5k** → held out as benchmark, never trained on |
+| **MS COCO** | cocodataset.org | training reals **and** the benchmark reals, kept strictly apart | `train2017` **118k** images → training reals (capped, e.g. `--limit 6000`) · `val2017` **5k** → **held out as benchmark, never trained on** |
 | **Unsplash Lite** | github.com/unsplash/datasets (TSV metadata + self-fetched images) | stylistic diversity in the *real* class | **~25k** rows available · **~3,000** downloaded, keyworded `portrait,person,food,city,animal` |
 | **Generator pool** | flat local pool, split by `split_pool.py` | fakes by generator family | real **70,000** · SDXL **53,087** · FLUX_DEV **7,273** · FLUX_PRO **3,209** — capped to `--per-generator` (e.g. 3,000) so the fake set is not 83% SDXL |
 | **Official validation benchmark** | COCO val2017 + DALL-E Advanced | held out; a preview of the hidden test set | **~4,998 real / ~8,843 fake** (≈1:1.77 — hence *balanced* accuracy, since calling everything fake scores 64%) |
@@ -673,7 +689,7 @@ makes the file readable on its own:
 | field | what it is |
 | --- | --- |
 | `image_path` | absolute by default; relative to the input directory with `--relative` |
-| `pred` | **the contract** — P(AI-generated) in `[0, 1]`, rounded to 6 decimals |
+| `pred` | — P(AI-generated) in `[0, 1]`, rounded to 6 decimals |
 | `prediction` | `"fake"` if the score is at or above the threshold, `"real"` below |
 
 Every input image gets exactly one record, in sorted path order. An image that
