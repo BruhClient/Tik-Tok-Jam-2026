@@ -34,16 +34,7 @@ from pathlib import Path
 
 from PIL import Image
 
-IMG_EXT = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-
-
-def list_images(d: Path) -> list[Path]:
-    return sorted(p for p in d.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXT)
-
-
-def geometry_params(w: int, h: int, rng: random.Random, lo: int = 384, hi: int = 1024):
-    s = min(w, h)
-    return rng.randint(0, w - s), rng.randint(0, h - s), s, rng.randint(lo, hi)
+from _geom import IMG_EXT, geometry_params, list_images
 
 
 def place(src: Path, dst: Path, rng: random.Random, normalise_geometry: bool,

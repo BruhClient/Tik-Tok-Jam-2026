@@ -39,31 +39,13 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from _geom import apply_geometry, geometry_params
+
 LABEL_DIR = {
     0: ("real", "openimages"),
     1: ("fake", "full_synthetic"),
     2: ("fake", "tampered"),
 }
-
-
-# --------------------------------------------------------------------------
-# geometry normalisation — kills the aspect + resolution shortcut
-# --------------------------------------------------------------------------
-
-
-def geometry_params(w: int, h: int, py_rng: random.Random,
-                    lo: int = 512, hi: int = 1024) -> tuple[int, int, int, int]:
-    """Random square crop box + a target side drawn from a class-independent range."""
-    s = min(w, h)
-    left = py_rng.randint(0, w - s)
-    top = py_rng.randint(0, h - s)
-    side = py_rng.randint(lo, hi)
-    return left, top, s, side
-
-
-def apply_geometry(img: Image.Image, params, resample=Image.Resampling.BICUBIC) -> Image.Image:
-    left, top, s, side = params
-    return img.crop((left, top, left + s, top + s)).resize((side, side), resample)
 
 
 # --------------------------------------------------------------------------
@@ -168,7 +150,7 @@ def main() -> None:
             if args.no_normalise_geometry:
                 params = None
             else:
-                params = geometry_params(*img.size, py_rng)
+                params = geometry_params(*img.size, py_rng, lo=512)
                 img = apply_geometry(img, params)
 
             d, sub = LABEL_DIR[lab]

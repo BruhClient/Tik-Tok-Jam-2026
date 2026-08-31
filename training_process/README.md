@@ -48,6 +48,7 @@ the ablation sweep in `run_all.py` cheap.
 - `fetch_unsplash.py` — extra Unsplash reals to broaden the real distribution
 - `split_pool.py` — split a flat, generator-separated pool into train/val/test
 - `make_smoke_data.py` — a tiny synthetic set so the pipeline can be smoke-tested
+- `_geom.py` — shared geometry helpers (`geometry_params`, `apply_geometry`, `list_images`, `IMG_EXT`) used by the prepare_* scripts and split_pool
 
 **Features & training**
 - `augment.py` — the degradation bank (JPEG/blur/resize/noise/…) + `normalise_source`

@@ -45,6 +45,8 @@ from pathlib import Path
 
 from PIL import Image
 
+from _geom import apply_geometry, geometry_params
+
 HF_DATASET = "Rajarshi-Roy-research/Defactify_Image_Dataset"
 
 # label_2 values -> folder-safe generator names. Values are matched
@@ -70,17 +72,6 @@ def slugify_generator(raw) -> str:
         return GENERATOR_SLUGS[key]
     cleaned = "".join(ch if ch.isalnum() else "_" for ch in str(raw)).strip("_")
     return cleaned or "unknown"
-
-
-def geometry_params(w: int, h: int, rng: random.Random, lo: int = 384, hi: int = 1024):
-    s = min(w, h)
-    return rng.randint(0, w - s), rng.randint(0, h - s), s, rng.randint(lo, hi)
-
-
-def apply_geometry(img: Image.Image, params) -> Image.Image:
-    left, top, s, side = params
-    return img.crop((left, top, left + s, top + s)).resize(
-        (side, side), Image.Resampling.BICUBIC)
 
 
 # --------------------------------------------------------------------------

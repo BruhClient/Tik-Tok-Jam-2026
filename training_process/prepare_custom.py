@@ -34,14 +34,10 @@ from pathlib import Path
 
 from PIL import Image
 
-IMG_EXT = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+from _geom import IMG_EXT, apply_geometry, geometry_params, list_images
 
 # your downloaded folder names -> the real/fake vocabulary scan_dir expects
 CLASS_MAP = {"ai": "fake", "real": "real"}
-
-
-def list_images(d: Path) -> list[Path]:
-    return sorted(p for p in d.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXT)
 
 
 # --------------------------------------------------------------------------
@@ -126,24 +122,6 @@ def audit(train_root: Path, n: int) -> None:
                 print("\n  squareness looks similar across classes — no obvious geometry shortcut.")
 
     print("\nIf nothing above says WARNING, you're clear to run `layout`.")
-
-
-# --------------------------------------------------------------------------
-# geometry normalisation (optional — only if audit found a shortcut)
-# --------------------------------------------------------------------------
-
-
-def geometry_params(w: int, h: int, rng: random.Random, lo: int = 384, hi: int = 1024):
-    s = min(w, h)
-    left = rng.randint(0, w - s)
-    top = rng.randint(0, h - s)
-    side = rng.randint(lo, hi)
-    return left, top, s, side
-
-
-def apply_geometry(img: Image.Image, params) -> Image.Image:
-    left, top, s, side = params
-    return img.crop((left, top, left + s, top + s)).resize((side, side), Image.Resampling.BICUBIC)
 
 
 # --------------------------------------------------------------------------
