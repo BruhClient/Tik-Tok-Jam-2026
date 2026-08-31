@@ -410,7 +410,7 @@ head -> logit -> sigmoid(platt_a * logit + platt_b)
 
 ## Reproducing the results
 
-### A. Inference only (you have `models/bundle.pt`)
+### A. Inference only (with `models/bundle.pt`)
 
 ```bash
 pip install -r requirements.txt
@@ -951,7 +951,7 @@ trained on, and because CLIP resizes to 224×224, a 3% edited patch becomes
 roughly 7×7 pixels. `probe_tampered.py` measures where that boundary sits rather
 than pretending it works.
 
-### What I would improve given more time
+### What we would improve on, given more time
 
 1. **Per-domain calibration as a first-class feature.** A lightweight content
    classifier in front of the head, routing to a per-domain threshold, would
