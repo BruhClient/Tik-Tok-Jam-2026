@@ -63,13 +63,22 @@ context — `--best-threshold` shows where F1 peaks on any labeled folder.
 
 ### Datasets and assets
 
-| dataset | source | used for |
+**Training data**
+
+| dataset | source | notes |
 | --- | --- | --- |
-| SID_Set | `saberzl/SID_Set` (HuggingFace) | primary training data — real OpenImages photos vs fully synthetic images |
-| MS COCOAI / Defactify | `Rajarshi-Roy-research/Defactify_Image_Dataset` (HuggingFace) | semantically-aligned real/fake pairs across SD3, SDXL, DALL·E 3, MidJourney |
-| Kaggle AI vs Human | Kaggle | additional real/AI pairs |
-| MS COCO (val2017) | `http://images.cocodataset.org` | held-out real benchmark, never seen during training |
-| Unsplash Lite | [unsplash.com/data](https://unsplash.com/data) | extra real photos to broaden the real distribution |
+| SID_Set | [`saberzl/SID_Set`](https://huggingface.co/datasets/saberzl/SID_Set) (HuggingFace) | primary source — real OpenImages photos vs fully synthetic images; geometry-normalised to remove the square-equals-fake shortcut |
+| MS COCOAI / Defactify | [`Rajarshi-Roy-research/Defactify_Image_Dataset`](https://huggingface.co/datasets/Rajarshi-Roy-research/Defactify_Image_Dataset) (HuggingFace) | semantically-aligned real/fake pairs (SD3, SDXL, DALL·E 3, MidJourney) — removes content/framing shortcuts |
+| AI vs Human Generated | [Kaggle](https://www.kaggle.com/datasets/alessandrasala79/ai-vs-human-generated-dataset) | additional real/AI pairs with CSV manifest |
+| 130k Real vs Fake Faces | [Kaggle](https://www.kaggle.com/datasets/shreyanshpatel1/130k-real-vs-fake-face) | large face-specific real/AI dataset |
+| Unsplash Lite | [github.com/unsplash/datasets](https://github.com/unsplash/datasets) | professionally-shot stock photos added to broaden the real-image distribution |
+
+**Benchmark / validation data**
+
+| dataset | source | notes |
+| --- | --- | --- |
+| MS COCO val2017 | [cocodataset.org](http://images.cocodataset.org) | held-out real images for the official benchmark; never used during training |
+| DALL·E Advanced | organiser-provided | synthetic half of the official validation benchmark |
 
 ---
 
@@ -97,12 +106,9 @@ context — `--best-threshold` shows where F1 peaks on any labeled folder.
 ```bash
 pip install -r requirements.txt
 
-# Download the trained model (see "Downloading the model" below)
-gh release download Model_for_tiktokTechJam2026 \
-    --repo BruhClient/Tik-Tok-Jam-2026 \
-    --pattern bundle.pt \
-    --dir models/
-
+# 1. Download bundle.pt from the Releases page (link below)
+# 2. Move it into the models/ folder in this repo
+# 3. Run:
 python detect.py sample_data                 # -> predictions.json + metrics
 python robustness.py sample_data             # -> robustness_report.json
 python gui.py                                # the window
@@ -132,7 +138,7 @@ like a hang.
 ```bash
 python detect.py <dir>
 python detect.py <dir> --best-threshold --report run_report.json
-python detect.py <dir> --out results.json --weights models/bundle_cvar.pt
+
 python detect.py <dir> --require-labels          # fail if labels are missing
 python detect.py --list-detectors
 ```
@@ -185,20 +191,12 @@ python gui.py predictions.json    # open a finished result file
 
 ## Downloading the model
 
-The trained bundle (`bundle.pt`, ~1.1 GB) is distributed as a GitHub Release
-asset — it is too large to store in the repository.
+The trained bundle (`bundle.pt`, ~1.1 GB) is too large to store in the
+repository and is distributed as a GitHub Release asset.
 
-**Option 1 — GitHub CLI (recommended):**
-```bash
-gh release download Model_for_tiktokTechJam2026 \
-    --repo BruhClient/Tik-Tok-Jam-2026 \
-    --pattern bundle.pt \
-    --dir models/
-```
-
-**Option 2 — direct browser download:**
-Go to the [Releases page](https://github.com/BruhClient/Tik-Tok-Jam-2026/releases/tag/Model_for_tiktokTechJam2026)
-and download `bundle.pt`, then place it at `models/bundle.pt`.
+1. Go to the **[Releases page](https://github.com/BruhClient/Tik-Tok-Jam-2026/releases/tag/Model_for_tiktokTechJam2026)**
+2. Download `bundle.pt`
+3. Move or drag it into the `models/` folder in this repo
 
 Once it is there, `detect.py`, `robustness.py` and `gui.py` will all pick it
 up automatically with no further configuration.
@@ -231,18 +229,10 @@ commented at the site with what it mirrors upstream:
 | `MAX_PIXELS`, `Image.MAX_IMAGE_PIXELS = None` | the same decode cap the training loader used |
 | `Head.net` layer indices | the checkpoint keys are `net.0/1/4/5/8`, so the ReLU and Dropout must stay in place even though they hold no weights |
 
-Two bundles are present, and they are **not** the same model — each carries its
-own calibration and its own operating point, read straight out of the file at
-load time and printed in the run log:
-
-| bundle | operating point | notes |
-| --- | --- | --- |
-| `models/bundle.pt` | `0.780` | the default — whatever sits at this path wins |
-| `models/bundle_cvar.pt` | `0.954` | the CVaR/1%-FPR calibration the figures below were measured on |
-
-Point at either with `--weights models/bundle_cvar.pt`. Never hardcode an
-operating point from this table into anything: read it from the bundle, which is
-what the app does.
+The bundle carries its own calibration and operating point, read straight out
+of the file at load time and printed in the run log as `operating point 0.XXX`.
+Never hardcode an operating point: read it from the bundle, which is what the
+app does.
 
 ---
 
@@ -279,13 +269,12 @@ in 85–98, so inference is deterministic.
 **The threshold is not 0.5.** Training used `pos_weight` and a CVaR objective,
 both of which distort the output scale, so the head's raw logits sit high. The
 Platt coefficients — fitted on pooled augmented validation scores — make the
-output readable as a probability, and the bundle carries the operating point it
-was calibrated for (`0.954` for `bundle_cvar.pt`, chosen for **1% FPR on real
-images**; `0.780` for `bundle.pt`). `detect.py` and the window both read it out
-of the file and adopt it automatically — the run log prints it as
-`operating point 0.780` — **Reset** on the slider goes back to it, and
-`--threshold` overrides it. **The JSON is always raw scores either way** — the
-threshold only ever changes what gets *printed* or *drawn*.
+output readable as a probability, and the bundle carries its calibrated
+operating point (printed in the run log as `operating point 0.XXX`). `detect.py`
+and the window both read it out of the file and adopt it automatically —
+**Reset** on the slider goes back to it, and `--threshold` overrides it.
+**The JSON is always raw scores either way** — the threshold only ever changes
+what gets *printed* or *drawn*.
 
 **What the architecture can and cannot see.** CLIP resizes to 224 before the
 patch embedding, which is why these features survive JPEG and blur so well and
@@ -417,27 +406,19 @@ writes.
 
 ## Results on the sample set
 
-Measured with **`models/bundle_cvar.pt`** on `sample_data/` (100 real, 100 AI,
-clean):
+Measured with **`models/bundle.pt`** on `sample_data/` (100 real, 100 AI, clean):
 
 | | |
 | --- | --- |
 | AUC | **0.921** |
-| accuracy at that bundle's own threshold (`0.954`) | **86.0%** |
 | recall (AI images caught) | **78%** |
 | FPR (authentic images wrongly flagged) | **6%** |
-| best-F1 threshold | `0.946` → **87.5%** accuracy |
 
-That operating point trades about a point and a half of accuracy for the low
-false-accusation rate it was calibrated for — which is the right trade for this
-job. Calling a real photograph fake is the expensive error.
-
-`models/bundle.pt`, the current default, is a later model and has not been
-re-measured on this table. Reproduce it for whichever bundle you are shipping:
+The model is calibrated for low false-accusation rate — calling a real
+photograph fake is the expensive error. Reproduce the numbers with:
 
 ```bash
 python detect.py sample_data --best-threshold --report run_report.json
-python detect.py sample_data --weights models/bundle_cvar.pt --best-threshold
 ```
 
 ---
