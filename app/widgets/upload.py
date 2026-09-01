@@ -2,8 +2,8 @@
 
 The old Run page inferred the kind of data from the folder and quietly went
 whichever way the scan fell. Here the choice is explicit and enforced - you
-declare a labeled dataset or plain images, and the app either honours it or
-tells you the folder cannot support it. That is what decides which results
+declare labelled or unlabelled data, and the app either honours it or tells
+you the folder cannot support it. That is what decides which results
 screen you land on.
 
 The enforcement is the peek: a ScanWorker reads the folder in the background as
@@ -11,26 +11,33 @@ soon as a path is typed, and _peek_text() turns what it found plus what you
 declared into the sentence under the field and into whether Run is enabled. The
 scan always runs with AUTO, so one scan answers both modes and switching the
 tile re-reads it rather than rescanning.
+
+The folder can arrive three ways - typed, browsed, or dropped - and all three
+end at the same setText, so the peek and the enabling logic below never have to
+know which one it was. Drops are handled by the page rather than by the
+DropZone widget, so anywhere on this screen is a target and the zone is only
+what says so.
 """
 
 from __future__ import annotations
 
 import os
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QVBoxLayout, QWidget
 )
 
 from .. import theme as T
-from ..dataset import LabelMode
+from ..dataset import IMAGE_EXTENSIONS, LabelMode
 from ..detectors import available_detectors
 from . import components as C
 from .components import Card, Hint, SectionTitle
 
-#: the two upload kinds. MODE_IMAGES maps to LabelMode.NONE, which is what
-#: makes "just images" ignore labels that happen to be there.
+#: the two upload kinds - "Labelled data" and "Unlabelled data" on screen.
+#: MODE_IMAGES maps to LabelMode.NONE, which is what makes "Unlabelled data"
+#: ignore labels that happen to be there.
 MODE_LABELED, MODE_IMAGES = range(2)
 
 #: what the scanner tries, in order - quoted back when a labeled folder has none
@@ -97,6 +104,97 @@ class ModeTile(QFrame):
         super().mousePressEvent(event)
 
 
+class DropZone(QFrame):
+    """The drop target for a folder, and a second way into the file dialog.
+
+    It holds no state of its own: UploadPage owns the drag events - see
+    UploadPage.dragEnterEvent - and calls set_message() to say what the zone
+    should read at each moment. That keeps one place deciding whether a given
+    drop is usable, instead of the zone guessing and the page deciding again.
+
+    Like ModeTile, the look is painted here: a QFrame has no pseudo-state for
+    "something is hovering over me", and a dashed border is not something the
+    global stylesheet says anywhere else.
+    """
+
+    clicked = pyqtSignal()
+
+    #: what the zone reads when nothing is being dragged over it
+    IDLE_TITLE = "Drop a folder of images here"
+    IDLE_DETAIL = "or click to browse — a predictions .json works too"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setProperty("dropzone", True)
+        self.setMinimumHeight(78)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._state = "idle"               # idle | ok | bad
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(3)
+        lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.title_label = QLabel(self.IDLE_TITLE)
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.detail_label = QLabel(self.IDLE_DETAIL)
+        self.detail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.detail_label.setWordWrap(True)
+        lay.addWidget(self.title_label)
+        lay.addWidget(self.detail_label)
+        self._paint()
+
+    def set_message(self, state: str, title: str = None, detail: str = None):
+        """Say what is about to happen. `state` is idle, ok or bad.
+
+        `title=None` restores the resting wording, which is what a drag leaving
+        the window has to fall back to.
+        """
+        self._state = state
+        self.title_label.setText(title or self.IDLE_TITLE)
+        self.detail_label.setText(self.IDLE_DETAIL if title is None
+                                  else (detail or ""))
+        self._paint()
+
+    def _paint(self):
+        """Repaint for the current state, and for enabled/disabled.
+
+        Disabled is its own look rather than Qt's default fade: with no upload
+        kind chosen this zone is not a control that failed, it is one that is
+        not open yet, and the wording underneath says so.
+        """
+        if not self.isEnabled():
+            border, fill, title = T.BORDER, "transparent", T.TEXT_MUTED
+        elif self._state == "ok":
+            border, fill, title = T.ACCENT, T.ACCENT_SOFT, T.ACCENT_TEXT
+        elif self._state == "bad":
+            border, fill, title = T.BAD, "transparent", T.BAD
+        else:
+            border, fill, title = T.BORDER_STRONG, "transparent", T.TEXT_DIM
+
+        self.setStyleSheet(
+            'QFrame[dropzone="true"] { background-color: %s;'
+            ' border: 1px dashed %s; border-radius: %dpx; }'
+            % (fill, border, T.R_CARD))
+        self.title_label.setStyleSheet(
+            f"color: {title}; font-size: {C.FS_BODY}px; font-weight: 600;"
+            " background: transparent;")
+        self.detail_label.setStyleSheet(
+            f"color: {T.TEXT_MUTED if not self.isEnabled() else T.TEXT_FAINT};"
+            f" font-size: {C.FS_SMALL}px; background: transparent;")
+
+    def changeEvent(self, event):
+        """setEnabled() is called from _sync, and the look has to follow it."""
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.EnabledChange:
+            self._paint()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class UploadPage(QWidget):
     """Declare the data, point at it, run it."""
 
@@ -104,8 +202,11 @@ class UploadPage(QWidget):
         super().__init__(parent)
         self.app = app
         self.peek = None                   # Dataset from the last folder scan
+        self.busy = False                  # a run is in flight: refuse drops
+        # the page, not the zone, is the drop target - see dragEnterEvent
+        self.setAcceptDrops(True)
         # None until you choose. Neither tile is preselected: defaulting to
-        # "labeled" would quietly make the choice this screen exists to ask.
+        # "Labelled data" would quietly make the choice this screen exists to ask.
         self.mode = None
 
         outer = QVBoxLayout(self)
@@ -165,10 +266,10 @@ class UploadPage(QWidget):
 
         lay.addWidget(SectionTitle("What are you uploading"))
         self.tiles = [
-            ModeTile("Labeled dataset",
+            ModeTile("Labelled data",
                      "A folder holding real/ and ai/. You get accuracy, AUC, "
                      "ROC and the robustness sweep."),
-            ModeTile("Just images",
+            ModeTile("Unlabelled data",
                      "Any folder of images. You get a verdict per image - "
                      "AI-generated or authentic."),
         ]
@@ -182,8 +283,15 @@ class UploadPage(QWidget):
         lay.addSpacing(4)
         self.folder_title = SectionTitle("Folder")
         lay.addWidget(self.folder_title)
+        self.drop_zone = DropZone()
+        self.drop_zone.clicked.connect(self.browse_folder)
+        lay.addWidget(self.drop_zone)
+
         self.path_edit = QLineEdit()
         self.path_edit.setPlaceholderText("Choose an image folder...")
+        # QLineEdit takes URL drops itself and would paste a file:// string;
+        # refusing them here lets the event reach the page instead
+        self.path_edit.setAcceptDrops(False)
         self.path_edit.textChanged.connect(self._on_path_changed)
         self.browse_btn = QPushButton("Browse...")
         self.browse_btn.clicked.connect(self.browse_folder)
@@ -221,6 +329,7 @@ class UploadPage(QWidget):
         wr.setContentsMargins(0, 0, 0, 0)
         wr.setSpacing(8)
         self.weights_edit = QLineEdit()
+        self.weights_edit.setAcceptDrops(False)   # as above: let the page have it
         self.weights_edit.setPlaceholderText(
             "models/model.pt — leave empty for the default")
         weights_browse = QPushButton("Browse...")
@@ -267,7 +376,7 @@ class UploadPage(QWidget):
 
     @property
     def label_mode(self) -> LabelMode:
-        """NONE for plain images, so a labeled folder is still scored blind."""
+        """NONE for unlabelled data, so a labelled folder is still scored blind."""
         return LabelMode.NONE if self.mode == MODE_IMAGES else LabelMode.AUTO
 
     def set_mode(self, mode: int):
@@ -310,8 +419,9 @@ class UploadPage(QWidget):
         failed run does not leave Run clickable on a folder that cannot support
         the declared mode.
         """
+        self.busy = busy
         for w in (self.detector_combo, self.weights_row, self.path_edit,
-                  self.browse_btn, self.open_btn):
+                  self.browse_btn, self.open_btn, self.drop_zone):
             w.setEnabled(not busy)
         for tile in self.tiles:
             tile.setEnabled(not busy)
@@ -321,6 +431,103 @@ class UploadPage(QWidget):
             self.run_btn.setEnabled(False)
         else:
             self._sync()
+
+    # -- drag and drop -----------------------------------------------------
+    #
+    # Anywhere on this page is a target, not just the dashed rectangle: the
+    # events are handled here and the DropZone is only what advertises them.
+    # A drag that cannot be used is still accepted so that the zone can say
+    # why - refusing it in dragEnterEvent would leave the pointer showing a
+    # bare "no" and no sentence anywhere on screen.
+
+    def _dropped_paths(self, mime) -> list:
+        """The local paths in a drag, ignoring anything that is not a file."""
+        if not mime.hasUrls():
+            return []
+        return [u.toLocalFile() for u in mime.urls() if u.isLocalFile()]
+
+    def _classify_drop(self, paths):
+        """What a drop would do: (kind, path, title, detail).
+
+        `kind` is "dir", "json" or None; a None kind carries the reason in
+        `title` so the same call can drive both the hover message and what the
+        drop itself reports. Dropping loose image files resolves to the folder
+        they sit in, because a folder is the unit this app scores.
+        """
+        if not paths:
+            return None, None, "That is not a file", ""
+        if self.busy:
+            return None, None, "A run is already going", "Wait for it to finish."
+
+        dirs = [p for p in paths if os.path.isdir(p)]
+        files = [p for p in paths if os.path.isfile(p)]
+        jsons = [p for p in files if p.lower().endswith(".json")]
+        images = [p for p in files
+                  if os.path.splitext(p)[1].lower() in IMAGE_EXTENSIONS]
+
+        # a result file is not a folder and needs no upload kind - the Open
+        # button beside Run is ungated the same way
+        if len(paths) == 1 and jsons:
+            return ("json", jsons[0], "Open this result file",
+                    os.path.basename(jsons[0]))
+
+        if dirs:
+            if len(paths) > 1:
+                return None, None, "One folder at a time", ""
+            if self.mode is None:
+                return None, None, "Choose a kind above first", ""
+            return ("dir", dirs[0], "Score this folder",
+                    os.path.basename(os.path.normpath(dirs[0])) or dirs[0])
+
+        if images:
+            parents = {os.path.dirname(p) for p in images}
+            if len(parents) > 1:
+                return None, None, "Those images are in different folders", ""
+            if self.mode is None:
+                return None, None, "Choose a kind above first", ""
+            parent = parents.pop()
+            plural = "" if len(images) == 1 else "s"
+            return ("dir", parent, "Score the folder these sit in",
+                    f"{os.path.basename(parent) or parent} — dropped "
+                    f"{len(images)} image{plural}, the whole folder is scored")
+
+        return None, None, "Not a folder of images", "Drop a folder, or a predictions .json."
+
+    def dragEnterEvent(self, event):
+        paths = self._dropped_paths(event.mimeData())
+        if not paths:
+            event.ignore()
+            return
+        kind, _, title, detail = self._classify_drop(paths)
+        self.drop_zone.set_message("ok" if kind else "bad", title, detail)
+        event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        # Qt does not carry the enter decision forward on its own, and without
+        # this the drop never arrives
+        event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        self.drop_zone.set_message("idle")
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        kind, path, title, detail = self._classify_drop(
+            self._dropped_paths(event.mimeData()))
+        self.drop_zone.set_message("idle")
+        if kind == "dir":
+            event.acceptProposedAction()
+            # normpath: a dropped URL arrives with forward slashes, and this
+            # text is what the field shows back to a Windows user
+            self.set_directory(os.path.normpath(path))   # _on_path_changed follows
+        elif kind == "json":
+            event.acceptProposedAction()
+            self.app.load_predictions_file(path)
+        else:
+            event.ignore()
+            # _sync owns this line, so it clears itself on the next keystroke
+            self.status.setText(
+                " ".join(x for x in (title.rstrip(".") + ".", detail) if x))
 
     # -- folder peek -------------------------------------------------------
     def _on_path_changed(self):
@@ -355,12 +562,13 @@ class UploadPage(QWidget):
 
         count = f"{len(self.peek):,} images"
         if self.mode == MODE_IMAGES:
-            note = ("labels present but ignored — you asked for plain images"
+            note = ("labels present but ignored — you asked for unlabelled data"
                     if self.peek.has_labels else "no labels — verdicts only")
             return f"{count}   ·   {note}", T.TEXT_DIM, True
         if not self.peek.has_labels:
             return (f"{count}, but no labels. Looked for {LABEL_SOURCES}.\n"
-                    'Fix the folder, or choose "Just images" to score it anyway.',
+                    'Fix the folder, or choose "Unlabelled data" to score it '
+                    'anyway.',
                     T.BAD, False)
         source = self.peek.label_source_detail.split(" (")[0]
         return (f"{count}   ·   {self.peek.n_real:,} real / {self.peek.n_ai:,} AI"
@@ -378,8 +586,12 @@ class UploadPage(QWidget):
         self.weights_row.setVisible(bool(cls and cls.requires_weights))
 
         chosen = self.mode is not None
-        for w in (self.folder_title, self.path_edit, self.browse_btn):
-            w.setEnabled(chosen)
+        for w in (self.folder_title, self.path_edit, self.browse_btn,
+                  self.drop_zone):
+            w.setEnabled(chosen and not self.busy)
+        self.drop_zone.set_message(
+            "idle", None if chosen else "Choose a kind above first",
+            None if chosen else "then drop the folder here")
 
         message, color, ok = self._peek_text()
         self.peek_label.setText(message)

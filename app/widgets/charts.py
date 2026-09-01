@@ -85,7 +85,7 @@ class MplCanvas(FigureCanvasQTAgg):
                 drew = True
         if unlabeled_scores is not None and len(unlabeled_scores):
             self.ax.hist(np.asarray(unlabeled_scores, dtype=float), bins=bins,
-                         color=T.TEXT_FAINT, alpha=0.65, label="Unlabeled",
+                         color=T.TEXT_FAINT, alpha=0.65, label="Unlabelled",
                          edgecolor="none")
             drew = True
 
@@ -106,7 +106,7 @@ class MplCanvas(FigureCanvasQTAgg):
         self._reset()
         fpr, tpr = M.roc_points(y_true, scores)
         if fpr is None:
-            return self.clear_to_message("ROC needs both classes labeled")
+            return self.clear_to_message("ROC needs both classes labelled")
         auc = M.roc_auc(y_true, scores)
         self.ax.plot([0, 1], [0, 1], color=T.BORDER_STRONG, linestyle="--",
                      linewidth=1)
@@ -125,7 +125,7 @@ class MplCanvas(FigureCanvasQTAgg):
         self._reset()
         rec, prec = M.pr_points(y_true, scores)
         if rec is None:
-            return self.clear_to_message("PR curve needs both classes labeled")
+            return self.clear_to_message("PR curve needs both classes labelled")
         ap = M.average_precision(y_true, scores)
         self.ax.plot(rec, prec, color=T.SECONDARY, linewidth=2)
         self.ax.fill_between(rec, prec, color=T.SECONDARY, alpha=0.10)
@@ -175,7 +175,7 @@ class MplCanvas(FigureCanvasQTAgg):
         self._reset()
         y = np.asarray(y_true)
         if y.size == 0 or len(set(y.tolist())) < 2:
-            return self.clear_to_message("Threshold sweep needs both classes labeled")
+            return self.clear_to_message("Threshold sweep needs both classes labelled")
         ts, acc, f1, fpr = M.threshold_sweep(y_true, scores)
         self.ax.plot(ts, acc, color=T.ACCENT, linewidth=1.8, label="accuracy")
         self.ax.plot(ts, f1, color=T.SECONDARY, linewidth=1.6, label="F1")

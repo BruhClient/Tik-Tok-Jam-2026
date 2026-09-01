@@ -61,7 +61,7 @@ def delta_color(value: float) -> str:
 class InsightsPage(QWidget):
     """Metrics, distribution, ROC and confusion - labeled data only.
 
-    Unlabeled data never reaches here; it goes to the verdict gallery,
+    Unlabelled data never reaches here; it goes to the verdict gallery,
     which is why nothing on this page has an empty-truth branch.
     """
 
@@ -618,7 +618,8 @@ class RobustnessPage(QWidget):
             if app.dataset is None:
                 self.status.setText("Upload a folder first.")
             else:
-                self.status.setText(f"{len(app.dataset.labeled_indices()):,} labeled images ready.")
+                self.status.setText(
+                    f"{len(app.dataset.labeled_indices()):,} labelled images ready.")
             return
 
         baseline = view.get("baseline", float("nan"))

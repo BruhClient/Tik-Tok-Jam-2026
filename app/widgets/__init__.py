@@ -1,7 +1,7 @@
 """The Qt window, screen by screen.
 
     window.py      the shell: two screens, the header, the threshold, run state
-    upload.py      screen 1 - declare the data, pick the folder
+    upload.py      screen 1 - declare the data, drop or pick the folder
     loading.py     the working screen shown while a run is in flight
     pages.py       screen 2, labeled - insights, images, robustness
     gallery.py     screen 2, unlabeled - a verdict per image

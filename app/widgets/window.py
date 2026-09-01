@@ -1,8 +1,8 @@
 """The application shell: an upload screen, then a results screen.
 
 There is no navigation rail. You start by saying what you are uploading, and
-what comes back is decided by that: a labeled dataset opens on Insights with
-Images and Robustness behind header tabs, while plain images open on the
+what comes back is decided by that: labelled data opens on Insights with
+Images and Robustness behind header tabs, while unlabelled data opens on the
 verdict gallery with no tabs at all - there is nothing else to look at when
 there is no ground truth.
 
@@ -399,7 +399,7 @@ class AppWindow(QMainWindow):
         """Score the chosen folder on a worker thread.
 
         `label_mode` defaults to what the upload screen declared - NONE for
-        "just images", which ignores labels that are present.
+        "Unlabelled data", which ignores labels that are present.
         """
         if self.worker is not None:
             return                    # already running; ignore the second click
@@ -579,7 +579,10 @@ class AppWindow(QMainWindow):
         if not path:
             return
         try:
-            n = EX.export_predictions_json(path, self.dataset, self.result)
+            # the live slider value, so the exported verdicts match what the
+            # window is currently showing rather than the model's default point
+            n = EX.export_predictions_json(path, self.dataset, self.result,
+                                           threshold=self.threshold)
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
             return
